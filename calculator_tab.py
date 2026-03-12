@@ -131,7 +131,6 @@ class CalculatorTab(ttk.Frame):
                 'pan_weight': self._get_pan_weight(dish_data['default_pan_id']) if dish_data else 0,
                 'cooked_weight': dish_data['default_cooked_weight'] if dish_data else None,
                 'serving_weight': None,  # будет вычислено позже
-                'original_composition': [dict(item) for item in comp_list]  # копия для отслеживания изменений
             }
             self.components.append(component)
             self.update_components_list()
@@ -217,10 +216,10 @@ class CalculatorTab(ttk.Frame):
         comp = self.components[self.current_component_index]
         if comp['type'] != 'dish':
             return True
-        # Сравниваем текущие веса с original_composition
+        # Сравниваем текущие веса с исходными (original_weight)
         changed = False
-        for i, item in enumerate(comp['composition']):
-            if item['current_weight'] != comp['original_composition'][i]['current_weight']:
+        for item in comp['composition']:
+            if item['current_weight'] != item['original_weight']:
                 changed = True
                 break
         if not changed:
@@ -237,9 +236,9 @@ class CalculatorTab(ttk.Frame):
         elif answer:  # Да
             self.save_as_recipe(comp)
         else:  # Нет
-            # Откатываем изменения
-            for i, item in enumerate(comp['original_composition']):
-                comp['composition'][i]['current_weight'] = item['current_weight']
+            # Откатываем изменения: возвращаем original_weight
+            for item in comp['composition']:
+                item['current_weight'] = item['original_weight']
         return True
 
     def save_as_recipe(self, comp):
@@ -256,8 +255,6 @@ class CalculatorTab(ttk.Frame):
         ttk.Radiobutton(dialog, text="Новое блюдо", variable=var, value="new").pack(anchor='w', padx=20)
         ttk.Radiobutton(dialog, text="Обновить текущее", variable=var, value="update").pack(anchor='w', padx=20)
 
-        name_var = tk.StringVar(value=comp['name'])
-
         def do_save():
             if var.get() == "new":
                 new_name = simpledialog.askstring("Новое блюдо", "Введите название:", parent=dialog)
@@ -270,42 +267,35 @@ class CalculatorTab(ttk.Frame):
                     database.add_dish_composition(dish_id, item['product_id'], item['current_weight'])
                 # Обновляем списки
                 self.load_lists()
-                # Можно заменить текущий компонент на новое блюдо?
-                # Но по логике, мы не меняем текущий приём, просто создаём рецепт
                 messagebox.showinfo("Инфо", "Новое блюдо сохранено")
-                # Обновляем original_composition у текущего компонента?
-                # Лучше оставить как есть, пользователь сам решит.
+                # Не меняем текущий компонент, но можно предложить заменить?
+                # Оставляем как есть.
             else:  # update
                 # Обновляем существующее блюдо
                 database.update_dish(comp['id'], comp['name'], comp['pan_id'], comp['cooked_weight'])
-                # Очищаем старый состав
-                # В нашей структуре нет прямого удаления всех продуктов, поэтому придётся:
-                # 1. Получить текущий состав из БД
+                # Очищаем старый состав и добавляем новый
                 current_comp = database.get_dish_composition(comp['id'])
                 for item in current_comp:
                     database.delete_dish_composition(comp['id'], item['product_id'])
-                # Добавляем новые записи
                 for item in comp['composition']:
                     database.add_dish_composition(comp['id'], item['product_id'], item['current_weight'])
-                # Обновляем original_composition
-                comp['original_composition'] = [dict(item) for item in comp['composition']]
+                # Теперь обновляем original_weight в текущем компоненте, чтобы новые изменения считались от новой базы
+                for item in comp['composition']:
+                    item['original_weight'] = item['current_weight']
                 messagebox.showinfo("Инфо", "Рецепт обновлён")
             dialog.destroy()
 
         ttk.Button(dialog, text="Сохранить", command=do_save).pack(pady=5)
         ttk.Button(dialog, text="Отмена", command=dialog.destroy).pack(pady=5)
 
-
     def show_component_details(self, index):
         """Отображает панель деталей для компонента с заданным индексом."""
-        # Очищаем старые виджеты
         self.clear_details()
-
         comp = self.components[index]
         if comp['type'] == 'product':
-            self.show_product_details(index, comp)  # передаём index
+            self.show_product_details(index, comp)
         else:
-            self.show_dish_details(index, comp)  # передаём index
+            self.show_dish_details(index, comp)
 
     def clear_details(self):
         for widget in self.details_frame.winfo_children():
@@ -313,8 +303,7 @@ class CalculatorTab(ttk.Frame):
 
     def show_product_details(self, index, comp):
         """Панель для продукта."""
-        ttk.Label(self.details_frame, text=f"Продукт: {comp['name']}", font=('Arial', 11, 'bold')).pack(anchor='w',
-                                                                                                        pady=5)
+        ttk.Label(self.details_frame, text=f"Продукт: {comp['name']}", font=('Arial', 11, 'bold')).pack(anchor='w', pady=5)
 
         frame = ttk.Frame(self.details_frame)
         frame.pack(fill='x', pady=5)
@@ -324,16 +313,14 @@ class CalculatorTab(ttk.Frame):
             weight_var.set(str(comp['serving_weight']))
         entry = ttk.Entry(frame, textvariable=weight_var, width=10)
         entry.pack(side='left', padx=5)
-        # Захватываем index в лямбде
         entry.bind('<KeyRelease>', lambda e, idx=index: self.update_product_weight(idx, weight_var.get()))
 
-        # Метка для отображения КБЖУ на данный вес
         self.product_nutrition_label = ttk.Label(self.details_frame, text="")
         self.product_nutrition_label.pack(anchor='w', pady=5)
 
-        # Принудительно обновим при загрузке
         if comp['serving_weight']:
             self.update_product_weight(index, weight_var.get())
+
     def update_product_weight(self, index, weight_str):
         """Обновляет вес продукта и пересчитывает итоги."""
         try:
@@ -342,7 +329,6 @@ class CalculatorTab(ttk.Frame):
             return
         comp = self.components[index]
         comp['serving_weight'] = weight
-        # Пересчёт и отображение
         nut = calculate_product_nutrition(comp['product_data'], weight)
         gn = calculate_gn(nut['carbs'], comp['product_data']['glycemic_index'])
         xe = calculate_xe(nut['carbs'], self.carbs_per_xe)
@@ -355,12 +341,10 @@ class CalculatorTab(ttk.Frame):
 
     def show_dish_details(self, index, comp):
         """Панель для блюда."""
-        # Заголовок
         title_frame = ttk.Frame(self.details_frame)
         title_frame.pack(fill='x', pady=5)
         ttk.Label(title_frame, text=f"Блюдо: {comp['name']}", font=('Arial', 11, 'bold')).pack(side='left')
-        ttk.Button(title_frame, text="Сохранить как рецепт", command=lambda: self.save_as_recipe(comp)).pack(
-            side='right')
+        ttk.Button(title_frame, text="Сохранить как рецепт", command=lambda: self.save_as_recipe(comp)).pack(side='right')
 
         # Выбор кастрюли
         pan_frame = ttk.Frame(self.details_frame)
@@ -370,14 +354,13 @@ class CalculatorTab(ttk.Frame):
         pan_combo = ttk.Combobox(pan_frame, textvariable=self.pan_var, values=[p[1] for p in self.pans_list],
                                  state='readonly', width=30)
         pan_combo.pack(side='left', padx=5)
-        # Устанавливаем текущую кастрюлю
         current_pan_id = comp.get('pan_id')
         for i, (pid, name, _) in enumerate(self.pans_list):
             if pid == current_pan_id:
                 pan_combo.current(i)
                 break
         else:
-            pan_combo.current(0)  # "— нет —"
+            pan_combo.current(0)
         pan_combo.bind('<<ComboboxSelected>>', lambda e, idx=index: self.update_dish_pan(idx, self.pan_var.get()))
 
         # Вес готового блюда
@@ -413,20 +396,17 @@ class CalculatorTab(ttk.Frame):
         self.comp_tree.column('weight', width=100)
         self.comp_tree.pack(fill='both', expand=True, pady=5)
 
-        # Заполняем таблицу
         for item in comp['composition']:
             self.comp_tree.insert('', 'end', values=(item['product_name'], item['current_weight']),
                                   tags=(item['product_id'],))
 
-        # Привязываем событие двойного щелчка
         self.comp_tree.bind('<Double-1>', self.on_dish_product_double_click)
 
-        # Метка для отображения КБЖУ порции блюда
         self.dish_nutrition_label = ttk.Label(self.details_frame, text="")
         self.dish_nutrition_label.pack(anchor='w', pady=5)
 
-        # Первоначальный расчёт
         self.update_dish_nutrition(index)
+
     def on_dish_product_double_click(self, event):
         """Редактирование веса продукта в составе блюда."""
         item = self.comp_tree.selection()
@@ -439,16 +419,13 @@ class CalculatorTab(ttk.Frame):
         new_weight = simpledialog.askfloat("Изменить вес", f"Новый вес для {product_name} (г):",
                                            initialvalue=current_weight, parent=self)
         if new_weight is not None and new_weight > 0:
-            # Обновляем в comp['composition']
             product_id = self.comp_tree.item(item, 'tags')[0]
             comp = self.components[self.current_component_index]
             for prod in comp['composition']:
                 if prod['product_id'] == product_id:
                     prod['current_weight'] = new_weight
                     break
-            # Обновляем таблицу
             self.comp_tree.item(item, values=(product_name, new_weight))
-            # Пересчитываем питание для блюда
             self.update_dish_nutrition(self.current_component_index)
 
     def update_dish_pan(self, index, pan_name):
@@ -483,7 +460,6 @@ class CalculatorTab(ttk.Frame):
     def update_dish_nutrition(self, index):
         """Пересчитывает и отображает КБЖУ для порции блюда."""
         comp = self.components[index]
-        # Проверяем, что все необходимые данные заполнены
         if not comp.get('cooked_weight') or not comp.get('serving_weight') or comp['pan_weight'] is None:
             self.dish_nutrition_label.config(text="Заполните вес готового блюда и порции, выберите кастрюлю")
             return
@@ -502,7 +478,6 @@ class CalculatorTab(ttk.Frame):
 
         factor = portion / net_weight
 
-        # Суммируем КБЖУ всех ингредиентов (по их current_weight)
         total_calories = 0
         total_proteins = 0
         total_fats = 0
@@ -517,7 +492,6 @@ class CalculatorTab(ttk.Frame):
             gn = calculate_gn(nut['carbs'], prod['product_data']['glycemic_index'])
             total_gn += gn
 
-        # Умножаем на коэффициент порции
         cal_portion = total_calories * factor
         prot_portion = total_proteins * factor
         fat_portion = total_fats * factor
@@ -525,7 +499,6 @@ class CalculatorTab(ttk.Frame):
         gn_portion = total_gn * factor
         xe_portion = calculate_xe(carb_portion, self.carbs_per_xe)
 
-        # Сохраняем в компонент для последующего использования в итогах
         comp['_nutrition'] = {
             'calories': cal_portion,
             'proteins': prot_portion,
@@ -554,7 +527,7 @@ class CalculatorTab(ttk.Frame):
                     total_fat += nut['fats']
                     total_carb += nut['carbs']
                     total_gn += calculate_gn(nut['carbs'], comp['product_data']['glycemic_index'])
-            else:  # dish
+            else:
                 if '_nutrition' in comp:
                     n = comp['_nutrition']
                     total_cal += n['calories']
@@ -575,7 +548,6 @@ class CalculatorTab(ttk.Frame):
         if not self.components:
             messagebox.showwarning("Предупреждение", "Нет компонентов для сохранения")
             return
-        # Проверяем, все ли компоненты заполнены корректно
         for comp in self.components:
             if comp['type'] == 'product' and not comp.get('serving_weight'):
                 messagebox.showerror("Ошибка", f"У продукта '{comp['name']}' не указан вес порции")
@@ -588,7 +560,6 @@ class CalculatorTab(ttk.Frame):
                     messagebox.showerror("Ошибка", f"У блюда '{comp['name']}' вес нетто не положителен")
                     return
 
-        # Диалог ввода даты/времени, дозы, примечания
         dialog = tk.Toplevel(self)
         dialog.title("Сохранение приёма")
         dialog.transient(self)
@@ -616,7 +587,6 @@ class CalculatorTab(ttk.Frame):
             insulin = float(insulin) if insulin else None
             notes = notes_var.get().strip() or None
 
-            # Формируем список компонентов для сохранения
             components_for_db = []
             for comp in self.components:
                 if comp['type'] == 'product':
@@ -627,8 +597,6 @@ class CalculatorTab(ttk.Frame):
                         'serving_weight': comp['serving_weight']
                     })
                 else:
-                    # Для блюда нужно подготовить composition с весами в порции
-                    # Рассчитываем коэффициент порции
                     net_weight = comp['cooked_weight'] - comp['pan_weight']
                     factor = comp['serving_weight'] / net_weight
                     composition_portion = []
@@ -651,8 +619,6 @@ class CalculatorTab(ttk.Frame):
                 database.save_meal(dt, insulin, notes, components_for_db)
                 messagebox.showinfo("Успех", "Приём пищи сохранён")
                 dialog.destroy()
-                # Очистить текущий приём?
-                # Можно спросить пользователя
                 if messagebox.askyesno("Очистить", "Очистить текущий приём?"):
                     self.components.clear()
                     self.current_component_index = None

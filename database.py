@@ -83,12 +83,13 @@ def init_db():
             )
         ''')
 
+        # Таблица детального состава приёма пищи
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS meal_composition_details (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 meal_id INTEGER NOT NULL,
                 meal_component_id INTEGER NOT NULL,
-                product_id INTEGER NOT NULL,
+                product_id INTEGER,  -- изменено: разрешён NULL (для случаев, когда продукт удалён)
                 weight REAL NOT NULL,
                 is_part_of_dish BOOLEAN NOT NULL,
                 FOREIGN KEY (meal_id) REFERENCES meals(id) ON DELETE CASCADE,
