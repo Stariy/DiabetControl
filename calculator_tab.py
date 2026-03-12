@@ -295,6 +295,7 @@ class CalculatorTab(ttk.Frame):
         ttk.Button(dialog, text="Сохранить", command=do_save).pack(pady=5)
         ttk.Button(dialog, text="Отмена", command=dialog.destroy).pack(pady=5)
 
+
     def show_component_details(self, index):
         """Отображает панель деталей для компонента с заданным индексом."""
         # Очищаем старые виджеты
@@ -302,17 +303,18 @@ class CalculatorTab(ttk.Frame):
 
         comp = self.components[index]
         if comp['type'] == 'product':
-            self.show_product_details(comp)
+            self.show_product_details(index, comp)  # передаём index
         else:
-            self.show_dish_details(comp)
+            self.show_dish_details(index, comp)  # передаём index
 
     def clear_details(self):
         for widget in self.details_frame.winfo_children():
             widget.destroy()
 
-    def show_product_details(self, comp):
+    def show_product_details(self, index, comp):
         """Панель для продукта."""
-        ttk.Label(self.details_frame, text=f"Продукт: {comp['name']}", font=('Arial', 11, 'bold')).pack(anchor='w', pady=5)
+        ttk.Label(self.details_frame, text=f"Продукт: {comp['name']}", font=('Arial', 11, 'bold')).pack(anchor='w',
+                                                                                                        pady=5)
 
         frame = ttk.Frame(self.details_frame)
         frame.pack(fill='x', pady=5)
@@ -322,15 +324,16 @@ class CalculatorTab(ttk.Frame):
             weight_var.set(str(comp['serving_weight']))
         entry = ttk.Entry(frame, textvariable=weight_var, width=10)
         entry.pack(side='left', padx=5)
-        entry.bind('<KeyRelease>', lambda e: self.update_product_weight(index, weight_var.get()))
+        # Захватываем index в лямбде
+        entry.bind('<KeyRelease>', lambda e, idx=index: self.update_product_weight(idx, weight_var.get()))
 
         # Метка для отображения КБЖУ на данный вес
         self.product_nutrition_label = ttk.Label(self.details_frame, text="")
         self.product_nutrition_label.pack(anchor='w', pady=5)
 
         # Принудительно обновим при загрузке
-        self.update_product_weight(self.current_component_index, weight_var.get())
-
+        if comp['serving_weight']:
+            self.update_product_weight(index, weight_var.get())
     def update_product_weight(self, index, weight_str):
         """Обновляет вес продукта и пересчитывает итоги."""
         try:
@@ -350,20 +353,22 @@ class CalculatorTab(ttk.Frame):
         )
         self.update_totals()
 
-    def show_dish_details(self, comp):
+    def show_dish_details(self, index, comp):
         """Панель для блюда."""
         # Заголовок
         title_frame = ttk.Frame(self.details_frame)
         title_frame.pack(fill='x', pady=5)
         ttk.Label(title_frame, text=f"Блюдо: {comp['name']}", font=('Arial', 11, 'bold')).pack(side='left')
-        ttk.Button(title_frame, text="Сохранить как рецепт", command=lambda: self.save_as_recipe(comp)).pack(side='right')
+        ttk.Button(title_frame, text="Сохранить как рецепт", command=lambda: self.save_as_recipe(comp)).pack(
+            side='right')
 
         # Выбор кастрюли
         pan_frame = ttk.Frame(self.details_frame)
         pan_frame.pack(fill='x', pady=5)
         ttk.Label(pan_frame, text="Кастрюля:").pack(side='left')
         self.pan_var = tk.StringVar()
-        pan_combo = ttk.Combobox(pan_frame, textvariable=self.pan_var, values=[p[1] for p in self.pans_list], state='readonly', width=30)
+        pan_combo = ttk.Combobox(pan_frame, textvariable=self.pan_var, values=[p[1] for p in self.pans_list],
+                                 state='readonly', width=30)
         pan_combo.pack(side='left', padx=5)
         # Устанавливаем текущую кастрюлю
         current_pan_id = comp.get('pan_id')
@@ -373,7 +378,7 @@ class CalculatorTab(ttk.Frame):
                 break
         else:
             pan_combo.current(0)  # "— нет —"
-        pan_combo.bind('<<ComboboxSelected>>', lambda e: self.update_dish_pan(index, self.pan_var.get()))
+        pan_combo.bind('<<ComboboxSelected>>', lambda e, idx=index: self.update_dish_pan(idx, self.pan_var.get()))
 
         # Вес готового блюда
         cooked_frame = ttk.Frame(self.details_frame)
@@ -384,7 +389,7 @@ class CalculatorTab(ttk.Frame):
             self.cooked_var.set(str(comp['cooked_weight']))
         cooked_entry = ttk.Entry(cooked_frame, textvariable=self.cooked_var, width=10)
         cooked_entry.pack(side='left', padx=5)
-        cooked_entry.bind('<KeyRelease>', lambda e: self.update_dish_cooked(index, self.cooked_var.get()))
+        cooked_entry.bind('<KeyRelease>', lambda e, idx=index: self.update_dish_cooked(idx, self.cooked_var.get()))
 
         # Вес порции
         serving_frame = ttk.Frame(self.details_frame)
@@ -395,10 +400,10 @@ class CalculatorTab(ttk.Frame):
             self.serving_var.set(str(comp['serving_weight']))
         serving_entry = ttk.Entry(serving_frame, textvariable=self.serving_var, width=10)
         serving_entry.pack(side='left', padx=5)
-        serving_entry.bind('<KeyRelease>', lambda e: self.update_dish_serving(index, self.serving_var.get()))
+        serving_entry.bind('<KeyRelease>', lambda e, idx=index: self.update_dish_serving(idx, self.serving_var.get()))
 
-        # Таблица состава (с возможностью редактирования весов)
-        ttk.Label(self.details_frame, text="Состав блюда (веса можно редактировать):").pack(anchor='w', pady=(10,0))
+        # Таблица состава
+        ttk.Label(self.details_frame, text="Состав блюда (веса можно редактировать):").pack(anchor='w', pady=(10, 0))
 
         columns = ('product', 'weight')
         self.comp_tree = ttk.Treeview(self.details_frame, columns=columns, show='headings', height=8)
@@ -413,7 +418,7 @@ class CalculatorTab(ttk.Frame):
             self.comp_tree.insert('', 'end', values=(item['product_name'], item['current_weight']),
                                   tags=(item['product_id'],))
 
-        # Привязываем событие двойного щелчка для редактирования веса
+        # Привязываем событие двойного щелчка
         self.comp_tree.bind('<Double-1>', self.on_dish_product_double_click)
 
         # Метка для отображения КБЖУ порции блюда
@@ -422,7 +427,6 @@ class CalculatorTab(ttk.Frame):
 
         # Первоначальный расчёт
         self.update_dish_nutrition(index)
-
     def on_dish_product_double_click(self, event):
         """Редактирование веса продукта в составе блюда."""
         item = self.comp_tree.selection()
