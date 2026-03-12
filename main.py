@@ -5,7 +5,7 @@ from products_tab import ProductsTab
 from pans_tab import PansTab
 from dishes_tab import DishesTab
 from calculator_tab import CalculatorTab
-
+from history_tab import HistoryTab
 
 def populate_initial_data():
     """Заполняет базу начальными продуктами, если таблица пуста."""
@@ -98,7 +98,7 @@ class MainApp:
         self.calculator_tab = CalculatorTab(self.notebook)
         self.notebook.add(self.calculator_tab, text="Калькулятор")
 
-        self.history_tab = ttk.Frame(self.notebook)
+        self.history_tab = HistoryTab(self.notebook, calculator_tab=self.calculator_tab)
         self.notebook.add(self.history_tab, text="История")
 
         self.products_tab = ProductsTab(self.notebook)

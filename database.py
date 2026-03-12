@@ -414,3 +414,85 @@ def save_meal(datetime_str, insulin_dose, notes, components):
                     ''', (meal_id, comp_id, prod['product_id'], prod['weight']))
         conn.commit()
         return meal_id
+# ---- Функции для работы с историей ----
+def get_all_meals():
+    """Возвращает список всех приёмов пищи, отсортированных по дате (убывание)."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, datetime, insulin_dose, notes
+            FROM meals
+            ORDER BY datetime DESC
+        ''')
+        return cursor.fetchall()
+
+def get_meal(meal_id):
+    """Возвращает данные о приёме (без состава)."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, datetime, insulin_dose, notes
+            FROM meals
+            WHERE id = ?
+        ''', (meal_id,))
+        return cursor.fetchone()
+
+def get_meal_components(meal_id):
+    """Возвращает список компонентов приёма с деталями."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        # Сначала получаем компоненты
+        cursor.execute('''
+            SELECT id, component_type, product_id, dish_id, serving_weight,
+                   cooked_dish_weight, pan_id
+            FROM meal_components
+            WHERE meal_id = ?
+            ORDER BY id
+        ''', (meal_id,))
+        components = cursor.fetchall()
+
+        # Для каждого компонента получаем детальный состав
+        result = []
+        for comp in components:
+            comp_dict = dict(comp)
+            if comp_dict['component_type'] == 'product':
+                # Получаем название продукта
+                prod = get_product(comp_dict['product_id'])
+                comp_dict['product_name'] = prod['name'] if prod else '?'
+                comp_dict['details'] = []  # для продукта деталей нет
+            else:  # dish
+                # Получаем название блюда
+                dish = get_dish(comp_dict['dish_id'])
+                comp_dict['dish_name'] = dish['name'] if dish else '?'
+                # Получаем детали состава этого блюда в приёме
+                cursor.execute('''
+                    SELECT product_id, weight, is_part_of_dish
+                    FROM meal_composition_details
+                    WHERE meal_component_id = ?
+                ''', (comp_dict['id'],))
+                details = cursor.fetchall()
+                comp_dict['details'] = [dict(d) for d in details]
+                # Добавляем названия продуктов в детали
+                for d in comp_dict['details']:
+                    prod = get_product(d['product_id'])
+                    d['product_name'] = prod['name'] if prod else '?'
+            result.append(comp_dict)
+        return result
+
+def delete_meal(meal_id):
+    """Удаляет приём пищи (каскадно удалятся компоненты и детали)."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM meals WHERE id=?", (meal_id,))
+        conn.commit()
+
+def update_meal(meal_id, datetime_str, insulin_dose, notes):
+    """Обновляет основные данные приёма."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE meals
+            SET datetime=?, insulin_dose=?, notes=?
+            WHERE id=?
+        ''', (datetime_str, insulin_dose, notes, meal_id))
+        conn.commit()
