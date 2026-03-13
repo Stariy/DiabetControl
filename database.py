@@ -57,11 +57,13 @@ def init_db():
             )
         ''')
 
+        # В функции init_db() обновите создание таблицы meals:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS meals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 datetime TEXT NOT NULL,
                 insulin_dose REAL,
+                glucose REAL,
                 notes TEXT
             )
         ''')
@@ -280,31 +282,18 @@ def delete_dish_composition(dish_id, product_id):
         conn.commit()
 
 # ---- Функции для сохранения приёма пищи ----
-def save_meal(datetime_str, insulin_dose, notes, components):
-    """
-    Сохраняет приём пищи.
-    components: список словарей, каждый словарь описывает компонент:
-        - type: 'product' или 'dish'
-        - id: id продукта/блюда
-        - name: название (для справки)
-        - serving_weight: вес порции
-        - для dish также:
-            - cooked_weight: вес готового блюда с кастрюлей
-            - pan_id: id кастрюли (может быть None)
-            - composition: список продуктов в порции (уже с учётом коэффициента)
-              каждый элемент: {'product_id': id, 'weight': вес в порции}
-    """
+# Обновите функцию save_meal для сохранения уровня сахара
+def save_meal(datetime_str, insulin_dose, notes, components, glucose=None):
+    """Сохраняет приём пищи (обновлённая версия с glucose)."""
     with get_connection() as conn:
         cursor = conn.cursor()
-        # Вставка в meals
         cursor.execute('''
-            INSERT INTO meals (datetime, insulin_dose, notes)
-            VALUES (?, ?, ?)
-        ''', (datetime_str, insulin_dose, notes))
+            INSERT INTO meals (datetime, insulin_dose, notes, glucose)
+            VALUES (?, ?, ?, ?)
+        ''', (datetime_str, insulin_dose, notes, glucose))
         meal_id = cursor.lastrowid
 
         for comp in components:
-            # Вставка в meal_components
             if comp['type'] == 'product':
                 cursor.execute('''
                     INSERT INTO meal_components
@@ -312,7 +301,6 @@ def save_meal(datetime_str, insulin_dose, notes, components):
                     VALUES (?, ?, ?, ?)
                 ''', (meal_id, 'product', comp['id'], comp['serving_weight']))
                 comp_id = cursor.lastrowid
-                # Детальная запись для продукта
                 cursor.execute('''
                     INSERT INTO meal_composition_details
                     (meal_id, meal_component_id, product_id, weight, is_part_of_dish)
@@ -321,27 +309,25 @@ def save_meal(datetime_str, insulin_dose, notes, components):
             else:  # dish
                 cursor.execute('''
                     INSERT INTO meal_components
-                    (meal_id, component_type, dish_id, serving_weight, cooked_dish_weight, pan_id)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (meal_id, 'dish', comp['id'], comp['serving_weight'],
-                      comp['cooked_weight'], comp.get('pan_id')))
+                    (meal_id, component_type, dish_id, serving_weight)
+                    VALUES (?, ?, ?, ?)
+                ''', (meal_id, 'dish', comp['id'], comp['serving_weight']))
                 comp_id = cursor.lastrowid
-                # Детальные записи для каждого продукта в составе блюда
-                for prod in comp['composition']:
+                for prod in comp.get('composition', []):
                     cursor.execute('''
                         INSERT INTO meal_composition_details
                         (meal_id, meal_component_id, product_id, weight, is_part_of_dish)
                         VALUES (?, ?, ?, ?, 1)
                     ''', (meal_id, comp_id, prod['product_id'], prod['weight']))
         conn.commit()
-        return meal_id
+        return meal_id# ---- Функции для работы с историей ----
 # ---- Функции для работы с историей ----
 def get_all_meals():
     """Возвращает список всех приёмов пищи, отсортированных по дате (убывание)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT id, datetime, insulin_dose, notes
+            SELECT id, datetime, insulin_dose, glucose, notes
             FROM meals
             ORDER BY datetime DESC
         ''')
@@ -352,12 +338,11 @@ def get_meal(meal_id):
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT id, datetime, insulin_dose, notes
+            SELECT id, datetime, insulin_dose, glucose, notes
             FROM meals
             WHERE id = ?
         ''', (meal_id,))
         return cursor.fetchone()
-
 def get_meal_components(meal_id):
     """Возвращает список компонентов приёма с деталями."""
     with get_connection() as conn:
@@ -416,4 +401,41 @@ def update_meal(meal_id, datetime_str, insulin_dose, notes):
             SET datetime=?, insulin_dose=?, notes=?
             WHERE id=?
         ''', (datetime_str, insulin_dose, notes, meal_id))
+        conn.commit()
+
+
+def get_settings():
+    """Загружает настройки из базы данных."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value REAL
+            )
+        ''')
+
+        settings = {}
+        cursor.execute("SELECT key, value FROM settings")
+        for key, value in cursor.fetchall():
+            settings[key] = value
+        return settings
+
+
+def save_settings(settings_dict):
+    """Сохраняет настройки в базу данных."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value REAL
+            )
+        ''')
+
+        for key, value in settings_dict.items():
+            cursor.execute('''
+                INSERT OR REPLACE INTO settings (key, value)
+                VALUES (?, ?)
+            ''', (key, value))
         conn.commit()
