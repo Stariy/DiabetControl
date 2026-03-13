@@ -9,7 +9,12 @@ class HistoryTab(ttk.Frame):
         self.calculator_tab = calculator_tab  # ссылка на калькулятор для копирования
         self.create_widgets()
         self.refresh_list()
+        # Привязываем событие появления вкладки
+        self.bind('<Map>', self.on_tab_show)
 
+    def on_tab_show(self, event):
+        """Обновляет список при активации вкладки."""
+        self.refresh_list()
     def create_widgets(self):
         # Кнопки
         btn_frame = ttk.Frame(self)

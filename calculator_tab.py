@@ -12,6 +12,7 @@ class CalculatorTab(ttk.Frame):
         self.products_list = []  # список продуктов для диалогов
         self.dishes_list = []  # список блюд
         self.carbs_per_xe = DEFAULT_CARBS_PER_XE
+        self.insulin_step = 0.5  # NEW: шаг дозирования инсулина (по умолчанию 0.5)
 
         # Коэффициенты для расчёта инсулина (будут загружены из БД)
         self.insulin_factors = {
@@ -19,6 +20,14 @@ class CalculatorTab(ttk.Frame):
             'target_glucose': 6.0,  # целевой уровень сахара ммоль/л
             'sensitivity': 2.0  # на сколько ммоль/л снижает 1 ед инсулина
         }
+        self.insulin_food_var = tk.StringVar(value="0.0")
+        self.insulin_corr_var = tk.StringVar(value="0.0")
+        self.insulin_dose_var = tk.StringVar(value="0.0")
+
+        # NEW: переменные для отображения ближайших доз и выбора целевой
+        self.insulin_lower_var = tk.StringVar(value="0.0")
+        self.insulin_upper_var = tk.StringVar(value="0.0")
+        self.target_dose_var = tk.StringVar(value="lower")
 
         self.create_widgets()
         self.load_lists()
@@ -39,24 +48,31 @@ class CalculatorTab(ttk.Frame):
             self.insulin_factors['carb_coefficient'] = settings.get('carb_coefficient', 1.0)
             self.insulin_factors['target_glucose'] = settings.get('target_glucose', 6.0)
             self.insulin_factors['sensitivity'] = settings.get('sensitivity', 2.0)
+            self.carbs_per_xe = settings.get('carbs_per_xe', DEFAULT_CARBS_PER_XE)
+            self.insulin_step = settings.get('insulin_step', 0.5)  # NEW
 
             # Обновляем поля ввода
             self.carb_coef_var.set(str(self.insulin_factors['carb_coefficient']))
             self.target_glucose_var.set(str(self.insulin_factors['target_glucose']))
             self.sensitivity_var.set(str(self.insulin_factors['sensitivity']))
+            self.carbs_per_xe_var.set(str(self.carbs_per_xe))
+            self.insulin_step_var.set(str(self.insulin_step))  # NEW
 
-    def save_settings(self):
-        """Сохраняет настройки в базу данных."""
+    def save_insulin_settings(self):
+        """Сохраняет настройки инсулина в базу данных."""
         try:
             carb_coef = float(self.carb_coef_var.get())
             target_glucose = float(self.target_glucose_var.get())
             sensitivity = float(self.sensitivity_var.get())
 
-            database.save_settings({
+            # Загружаем текущие настройки, чтобы не потерять carbs_per_xe и insulin_step
+            settings = database.get_settings() or {}
+            settings.update({
                 'carb_coefficient': carb_coef,
                 'target_glucose': target_glucose,
                 'sensitivity': sensitivity
             })
+            database.save_settings(settings)
 
             self.insulin_factors['carb_coefficient'] = carb_coef
             self.insulin_factors['target_glucose'] = target_glucose
@@ -64,9 +80,53 @@ class CalculatorTab(ttk.Frame):
 
             # Пересчитываем дозу инсулина
             self.update_insulin_dose()
+            messagebox.showinfo("Успех", "Настройки инсулина сохранены")
 
         except ValueError:
             messagebox.showerror("Ошибка", "Проверьте правильность ввода коэффициентов")
+
+    def save_xe_coefficient(self):
+        """Сохраняет коэффициент пересчёта ХЕ в базу данных."""
+        try:
+            val = float(self.carbs_per_xe_var.get())
+            if val <= 0:
+                messagebox.showerror("Ошибка", "Значение должно быть положительным")
+                self.carbs_per_xe_var.set(str(self.carbs_per_xe))
+                return
+
+            # Загружаем текущие настройки, чтобы не потерять остальные
+            settings = database.get_settings() or {}
+            settings['carbs_per_xe'] = val
+            database.save_settings(settings)
+
+            self.carbs_per_xe = val
+
+            # Пересчитываем итоги (ХЕ изменится)
+            self.update_totals()
+            self.update_insulin_dose()
+            messagebox.showinfo("Успех", "Коэффициент ХЕ сохранён")
+
+        except ValueError:
+            messagebox.showerror("Ошибка", "Введите число")
+            self.carbs_per_xe_var.set(str(self.carbs_per_xe))
+
+    # NEW: сохранение шага дозирования
+    def save_insulin_step(self):
+        try:
+            val = float(self.insulin_step_var.get())
+            if val <= 0:
+                messagebox.showerror("Ошибка", "Шаг должен быть положительным числом")
+                self.insulin_step_var.set(str(self.insulin_step))
+                return
+            settings = database.get_settings() or {}
+            settings['insulin_step'] = val
+            database.save_settings(settings)
+            self.insulin_step = val
+            self.update_insulin_dose()  # обновим отображение вариантов
+            messagebox.showinfo("Успех", "Шаг дозирования сохранён")
+        except ValueError:
+            messagebox.showerror("Ошибка", "Введите число")
+            self.insulin_step_var.set(str(self.insulin_step))
 
     def create_widgets(self):
         # Создаём PanedWindow для разделения на верхнюю и нижнюю части
@@ -86,10 +146,11 @@ class CalculatorTab(ttk.Frame):
         ttk.Button(btn_frame, text="Удалить выбранное", command=self.delete_component).pack(side='left', padx=2)
 
         # Таблица состава приёма
-        columns = ('name', 'calories', 'proteins', 'fats', 'carbs', 'gn', 'weight')
+        columns = ('adjust', 'name', 'calories', 'proteins', 'fats', 'carbs', 'gn', 'weight')  # NEW: добавили adjust
         self.tree = ttk.Treeview(top_frame, columns=columns, show='headings', height=10)
 
         # Настройка заголовков
+        self.tree.heading('adjust', text='Корр.')
         self.tree.heading('name', text='Название')
         self.tree.heading('calories', text='Ккал/100г')
         self.tree.heading('proteins', text='Б/100г')
@@ -99,6 +160,7 @@ class CalculatorTab(ttk.Frame):
         self.tree.heading('weight', text='Вес порции (г)')
 
         # Настройка ширины колонок
+        self.tree.column('adjust', width=50, anchor='center')
         self.tree.column('name', width=250, anchor='w')
         self.tree.column('calories', width=80, anchor='center')
         self.tree.column('proteins', width=60, anchor='center')
@@ -115,6 +177,8 @@ class CalculatorTab(ttk.Frame):
 
         # Привязываем двойной щелчок для редактирования веса
         self.tree.bind('<Double-1>', self.on_item_double_click)
+        # NEW: привязываем клик для чекбоксов
+        self.tree.bind('<Button-1>', self.on_tree_click)
 
         # Скроллбар для таблицы
         scrollbar = ttk.Scrollbar(top_frame, orient='vertical', command=self.tree.yview)
@@ -176,7 +240,7 @@ class CalculatorTab(ttk.Frame):
         ttk.Label(row3, text="ХЕ:", width=15).pack(side='left', padx=(20, 0))
         ttk.Label(row3, textvariable=self.total_vars['xe'], width=10, anchor='e').pack(side='left')
 
-        # Правая часть нижней панели - расчёт инсулина
+        # Правая часть нижней панели - расчёт инсулина и настройки
         right_bottom = ttk.Frame(bottom_frame, relief='groove', padding=10)
         right_bottom.pack(side='right', fill='both', padx=(10, 0))
 
@@ -190,7 +254,7 @@ class CalculatorTab(ttk.Frame):
         ttk.Label(coef_frame, text="1 ед на ХЕ:").grid(row=0, column=0, sticky='w', pady=2)
         self.carb_coef_var = tk.StringVar(value=str(self.insulin_factors['carb_coefficient']))
         ttk.Entry(coef_frame, textvariable=self.carb_coef_var, width=8).grid(row=0, column=1, padx=5)
-        ttk.Button(coef_frame, text="✓", command=self.save_settings, width=3).grid(row=0, column=2)
+        ttk.Button(coef_frame, text="✓", command=self.save_insulin_settings, width=3).grid(row=0, column=2)
 
         # Целевой сахар
         ttk.Label(coef_frame, text="Цель ммоль/л:").grid(row=1, column=0, sticky='w', pady=2)
@@ -202,24 +266,68 @@ class CalculatorTab(ttk.Frame):
         self.sensitivity_var = tk.StringVar(value=str(self.insulin_factors['sensitivity']))
         ttk.Entry(coef_frame, textvariable=self.sensitivity_var, width=8).grid(row=2, column=1, padx=5)
 
+        # --- NEW: шаг дозирования ---
+        ttk.Label(coef_frame, text="Шаг ручки (ед):").grid(row=5, column=0, sticky='w', pady=2)
+        self.insulin_step_var = tk.StringVar(value=str(self.insulin_step))
+        ttk.Entry(coef_frame, textvariable=self.insulin_step_var, width=8).grid(row=5, column=1, padx=5)
+        ttk.Button(coef_frame, text="✓", command=self.save_insulin_step, width=3).grid(row=5, column=2)
+
+        # --- Коэффициент ХЕ ---
+        ttk.Label(coef_frame, text="1 ХЕ = г углеводов:").grid(row=3, column=0, sticky='w', pady=2)
+        self.carbs_per_xe_var = tk.StringVar(value=str(self.carbs_per_xe))
+        ttk.Entry(coef_frame, textvariable=self.carbs_per_xe_var, width=8).grid(row=3, column=1, padx=5)
+        ttk.Button(coef_frame, text="✓", command=self.save_xe_coefficient, width=3).grid(row=3, column=2)
+
         # Текущий сахар
-        ttk.Label(coef_frame, text="Текущий сахар:").grid(row=3, column=0, sticky='w', pady=(10, 2))
+        ttk.Label(coef_frame, text="Текущий сахар:").grid(row=4, column=0, sticky='w', pady=(10, 2))
         self.current_glucose_var = tk.StringVar()
-        ttk.Entry(coef_frame, textvariable=self.current_glucose_var, width=8).grid(row=3, column=1, padx=5)
+        ttk.Entry(coef_frame, textvariable=self.current_glucose_var, width=8).grid(row=4, column=1, padx=5)
         self.current_glucose_var.trace('w', lambda *args: self.update_insulin_dose())
 
         # Результат
         result_frame = ttk.Frame(right_bottom)
-        result_frame.pack(fill='x', pady=10)
+        result_frame.pack(fill='x', pady=5)
 
-        ttk.Label(result_frame, text="Доза инсулина:", font=('Arial', 10, 'bold')).pack(side='left')
-        self.insulin_dose_var = tk.StringVar(value="0.0")
-        ttk.Label(result_frame, textvariable=self.insulin_dose_var, font=('Arial', 12, 'bold'),
+        # Доза на еду
+        food_frame = ttk.Frame(right_bottom)
+        food_frame.pack(fill='x')
+        ttk.Label(food_frame, text="На еду:", width=15).pack(side='left')
+        self.insulin_food_var = tk.StringVar(value="0.0")
+        ttk.Label(food_frame, textvariable=self.insulin_food_var, width=8, anchor='e').pack(side='left')
+        ttk.Label(food_frame, text="ед").pack(side='left')
+
+        # Коррекция
+        corr_frame = ttk.Frame(right_bottom)
+        corr_frame.pack(fill='x', pady=2)
+        ttk.Label(corr_frame, text="Коррекция:", width=15).pack(side='left')
+        self.insulin_corr_var = tk.StringVar(value="0.0")
+        ttk.Label(corr_frame, textvariable=self.insulin_corr_var, width=8, anchor='e').pack(side='left')
+        ttk.Label(corr_frame, text="ед").pack(side='left')
+
+        # Общая доза (жирным)
+        total_frame_label = ttk.Frame(right_bottom)
+        total_frame_label.pack(fill='x', pady=(5, 10))
+        ttk.Label(total_frame_label, text="ИТОГО:", font=('Arial', 10, 'bold')).pack(side='left')
+        ttk.Label(total_frame_label, textvariable=self.insulin_dose_var, font=('Arial', 12, 'bold'),
                   foreground='blue').pack(side='left', padx=5)
-        ttk.Label(result_frame, text="ед").pack(side='left')
+        ttk.Label(total_frame_label, text="ед").pack(side='left')
+
+        # --- NEW: панель коррекции дозы ---
+        adjust_frame = ttk.LabelFrame(right_bottom, text="Коррекция дозы", padding=5)
+        adjust_frame.pack(fill='x', pady=5)
+
+        # Радиокнопки выбора целевой дозы
+        ttk.Radiobutton(adjust_frame, text="Меньше: ", variable=self.target_dose_var, value="lower").pack(anchor='w')
+        ttk.Label(adjust_frame, textvariable=self.insulin_lower_var).pack(anchor='w', padx=(20,0))
+
+        ttk.Radiobutton(adjust_frame, text="Больше: ", variable=self.target_dose_var, value="upper").pack(anchor='w')
+        ttk.Label(adjust_frame, textvariable=self.insulin_upper_var).pack(anchor='w', padx=(20,0))
+
+        # Кнопка выполнения коррекции
+        ttk.Button(adjust_frame, text="Скорректировать еду", command=self.adjust_meal).pack(pady=5)
 
         # Кнопка сохранения приёма
-        ttk.Button(right_bottom, text="💾 Записать приём", command=self.save_meal).pack(pady=10)
+        ttk.Button(right_bottom, text="💾 Записать приём", command=self.save_meal).pack(pady=5)
 
     def load_lists(self):
         """Загружает списки продуктов и блюд."""
@@ -304,8 +412,9 @@ class CalculatorTab(ttk.Frame):
             # Добавляем в таблицу
             tag = 'dish'
             if nutrition:
-                self.tree.insert('', 'end',
+                tree_id = self.tree.insert('', 'end',
                                  values=(
+                                     '☑',  # NEW: по умолчанию отмечено
                                      f"🍲 {dish_name}",
                                      f"{nutrition['calories']:.0f}",
                                      f"{nutrition['proteins']:.1f}",
@@ -325,7 +434,8 @@ class CalculatorTab(ttk.Frame):
                     'composition': composition,
                     'nutrition_per_100': nutrition,
                     'serving_weight': None,
-                    'tree_id': self.tree.get_children()[-1]
+                    'tree_id': tree_id,
+                    'adjustable': True  # NEW
                 })
 
             dialog.destroy()
@@ -371,8 +481,9 @@ class CalculatorTab(ttk.Frame):
 
             # Добавляем в таблицу
             tag = 'product'
-            self.tree.insert('', 'end',
+            tree_id = self.tree.insert('', 'end',
                              values=(
+                                 '☑',  # NEW: по умолчанию отмечено
                                  f"🍎 {prod_name}",
                                  f"{prod_data['calories']:.0f}",
                                  f"{prod_data['proteins']:.1f}",
@@ -391,7 +502,8 @@ class CalculatorTab(ttk.Frame):
                 'name': prod_name,
                 'product_data': prod_data,
                 'serving_weight': None,
-                'tree_id': self.tree.get_children()[-1]
+                'tree_id': tree_id,
+                'adjustable': True  # NEW
             })
 
             dialog.destroy()
@@ -454,14 +566,41 @@ class CalculatorTab(ttk.Frame):
         if weight is not None and weight > 0:
             comp['serving_weight'] = weight
 
-            # Обновляем отображение веса в таблице
+            # Обновляем отображение веса в таблице (сохраняя чекбокс)
             values = list(item['values'])
-            values[6] = f"{weight:.0f}"  # вес порции
+            values[7] = f"{weight:.0f}"  # вес порции теперь на позиции 7
             self.tree.item(tree_id, values=values)
 
             # Пересчитываем итоги
             self.update_totals()
             self.update_insulin_dose()
+
+    # NEW: обработчик клика для переключения чекбокса
+    def on_tree_click(self, event):
+        """Обработчик клика для переключения чекбокса в колонке adjust."""
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+        column = self.tree.identify_column(event.x)
+        if column != '#1':  # колонка adjust первая
+            return
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return
+
+        # Получаем текущее значение
+        values = list(self.tree.item(item, 'values'))
+        current = values[0]
+        # Переключаем символ
+        new_val = '☐' if current == '☑' else '☑'
+        values[0] = new_val
+        self.tree.item(item, values=values)
+
+        # Обновляем состояние adjustable в компоненте
+        for comp in self.components:
+            if comp.get('tree_id') == item:
+                comp['adjustable'] = (new_val == '☑')
+                break
 
     def update_totals(self):
         """Обновляет итоговые суммы по всем компонентам."""
@@ -501,28 +640,148 @@ class CalculatorTab(ttk.Frame):
         self.total_vars['xe'].set(f"{total_xe:.2f}")
 
     def update_insulin_dose(self, *args):
-        """Рассчитывает дозу инсулина."""
+        """Рассчитывает дозу инсулина (пищевую и коррекцию) и определяет ближайшие допустимые значения."""
         try:
-            # Доза на ХЕ
+            # Пищевая доза (на ХЕ)
             xe = float(self.total_vars['xe'].get())
-            carb_dose = xe * self.insulin_factors['carb_coefficient']
+            food_dose = xe * self.insulin_factors['carb_coefficient']
+            self.insulin_food_var.set(f"{food_dose:.1f}")
 
             # Коррекция по сахару
             current_glucose = float(self.current_glucose_var.get() or 0)
             if current_glucose > 0:
                 target = self.insulin_factors['target_glucose']
                 sensitivity = self.insulin_factors['sensitivity']
-                correction_dose = (current_glucose - target) / sensitivity
-                if correction_dose < 0:
-                    correction_dose = 0
+                correction = (current_glucose - target) / sensitivity
+                if correction < 0:
+                    correction = 0
             else:
-                correction_dose = 0
+                correction = 0
+            self.insulin_corr_var.set(f"{correction:.1f}")
 
-            total_dose = carb_dose + correction_dose
+            # Общая доза
+            total_dose = food_dose + correction
             self.insulin_dose_var.set(f"{total_dose:.1f}")
 
+            # NEW: расчёт ближайших допустимых значений с учётом шага
+            step = self.insulin_step
+            # Округление вниз до ближайшего кратного шагу
+            lower = round((total_dose // step) * step, 1)
+            if lower < 0: lower = 0
+            upper = lower + step
+            # Убираем дублирование, если total_dose точно кратно шагу
+            if abs(total_dose - lower) < 0.01:
+                lower_display = lower
+                upper_display = lower + step
+            else:
+                lower_display = lower
+                upper_display = upper
+
+            self.insulin_lower_var.set(f"{lower_display:.1f}")
+            self.insulin_upper_var.set(f"{upper_display:.1f}")
+
         except (ValueError, ZeroDivisionError):
+            self.insulin_food_var.set("0.0")
+            self.insulin_corr_var.set("0.0")
             self.insulin_dose_var.set("0.0")
+            self.insulin_lower_var.set("0.0")
+            self.insulin_upper_var.set("0.0")
+
+    # NEW: метод корректировки еды
+    def adjust_meal(self):
+        """Корректирует веса отмеченных продуктов для достижения выбранной целевой дозы."""
+        # Проверяем, что все компоненты имеют вес
+        for comp in self.components:
+            if not comp.get('serving_weight'):
+                messagebox.showerror("Ошибка", f"У компонента '{comp['name']}' не указан вес порции")
+                return
+
+        # Получаем целевую дозу
+        target = self.target_dose_var.get()
+        if target == 'lower':
+            target_dose = float(self.insulin_lower_var.get())
+        else:
+            target_dose = float(self.insulin_upper_var.get())
+
+        # Получаем текущую общую дозу
+        total_dose = float(self.insulin_dose_var.get())
+        if abs(total_dose - target_dose) < 0.01:
+            messagebox.showinfo("Инфо", "Текущая доза уже равна целевой")
+            return
+
+        # Вычисляем текущие суммарные углеводы
+        total_carbs = 0
+        for comp in self.components:
+            if comp['type'] == 'product':
+                carbs = (comp['product_data']['carbs'] * comp['serving_weight']) / 100
+                total_carbs += carbs
+            else:  # dish
+                if comp.get('nutrition_per_100'):
+                    carbs = (comp['nutrition_per_100']['carbs'] * comp['serving_weight']) / 100
+                    total_carbs += carbs
+
+        # Целевые углеводы из целевой дозы (учитывая коррекцию)
+        correction = float(self.insulin_corr_var.get())
+        target_carbs = (target_dose - correction) * self.carbs_per_xe / self.insulin_factors['carb_coefficient']
+        if target_carbs < 0:
+            messagebox.showerror("Ошибка", "Целевая доза слишком мала (отрицательные углеводы)")
+            return
+
+        delta_carbs = target_carbs - total_carbs
+
+        # Собираем отмеченные продукты, которые можно корректировать (только продукты, не блюда)
+        adjustable_products = []
+        for comp in self.components:
+            if comp['type'] == 'product' and comp.get('adjustable', False):
+                # Вычисляем текущие углеводы продукта
+                carbs = (comp['product_data']['carbs'] * comp['serving_weight']) / 100
+                adjustable_products.append({
+                    'comp': comp,
+                    'current_carbs': carbs,
+                    'carbs_per_100': comp['product_data']['carbs']
+                })
+
+        if not adjustable_products:
+            messagebox.showwarning("Предупреждение", "Не отмечено ни одного продукта для корректировки")
+            return
+
+        # Распределяем изменение углеводов пропорционально текущему вкладу
+        total_adjustable_carbs = sum(p['current_carbs'] for p in adjustable_products)
+        if total_adjustable_carbs == 0:
+            messagebox.showerror("Ошибка", "Сумма углеводов в отмеченных продуктах равна 0")
+            return
+
+        # Изменяем веса продуктов
+        for prod in adjustable_products:
+            # Доля изменения, приходящаяся на этот продукт
+            share = prod['current_carbs'] / total_adjustable_carbs
+            prod_delta_carbs = delta_carbs * share
+            new_carbs = prod['current_carbs'] + prod_delta_carbs
+            if new_carbs < 0:
+                new_carbs = 0
+            # Новый вес
+            new_weight = (new_carbs * 100) / prod['carbs_per_100']
+            if new_weight < 0:
+                new_weight = 0
+            prod['comp']['serving_weight'] = new_weight
+
+            # Обновляем в таблице
+            tree_id = prod['comp']['tree_id']
+            self.tree.item(tree_id, values=(
+                '☑' if prod['comp']['adjustable'] else '☐',
+                f"🍎 {prod['comp']['name']}",
+                f"{prod['comp']['product_data']['calories']:.0f}",
+                f"{prod['comp']['product_data']['proteins']:.1f}",
+                f"{prod['comp']['product_data']['fats']:.1f}",
+                f"{prod['comp']['product_data']['carbs']:.1f}",
+                f"{calculate_gn(prod['comp']['product_data']['carbs'], prod['comp']['product_data']['glycemic_index']):.1f}",
+                f"{new_weight:.0f}"
+            ))
+
+        # Пересчитываем итоги
+        self.update_totals()
+        self.update_insulin_dose()
+        messagebox.showinfo("Успех", f"Веса скорректированы для достижения дозы {target_dose:.1f} ед")
 
     def save_meal(self):
         """Сохраняет текущий приём пищи в историю."""
