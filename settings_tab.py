@@ -1,0 +1,252 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import threading
+import database
+from theme import FONT_BOLD, FONT_TITLE
+
+
+class SettingsTab(ttk.Frame):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.create_widgets()
+        self.load_settings()
+        self.bind('<Map>', lambda e: self.load_settings())
+
+    def create_widgets(self):
+        canvas = tk.Canvas(self, highlightthickness=0)
+        vsb    = ttk.Scrollbar(self, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.pack(side='left', fill='both', expand=True)
+        vsb.pack(side='right', fill='y')
+
+        inner = ttk.Frame(canvas)
+        win   = canvas.create_window((0, 0), window=inner, anchor='nw')
+
+        def _resize(e):
+            canvas.configure(scrollregion=canvas.bbox('all'))
+            canvas.itemconfig(win, width=e.width)
+        inner.bind('<Configure>', _resize)
+        canvas.bind('<Configure>', lambda e: canvas.itemconfig(win, width=e.width))
+
+        row = [0]
+        def nr():
+            row[0] += 1
+            return row[0]
+
+        # ── Углеводы и ХЕ ────────────────────────────────────────────────────
+        self._section(inner, "Углеводы и хлебные единицы", nr())
+        self.carbs_per_xe_var = self._field(inner, nr(),
+            "1 ХЕ = … г углеводов:",
+            "Сколько граммов углеводов в одной ХЕ (обычно 10–12 г)", "12")
+
+        # ── Инсулин ───────────────────────────────────────────────────────────
+        self._section(inner, "Инсулин", nr())
+        self.carb_coef_var    = self._field(inner, nr(),
+            "Единиц инсулина на 1 ХЕ:",
+            "Углеводный коэффициент — сколько ед. инсулина на 1 ХЕ", "1.0")
+        self.sensitivity_var  = self._field(inner, nr(),
+            "1 ед снижает сахар на (ммоль/л):",
+            "Фактор чувствительности к инсулину", "2.0")
+        self.insulin_step_var = self._field(inner, nr(),
+            "Шаг ручки шприц-ручки (ед):",
+            "Минимальный шаг дозирования (обычно 0.5 или 1.0)", "0.5")
+
+        # Тип короткого инсулина — влияет на подсказку по времени укола
+        ins_type_row = nr()
+        ttk.Label(inner, text="Тип короткого инсулина:").grid(
+            row=ins_type_row, column=0, sticky='e', padx=(24, 8), pady=5)
+        self.insulin_type_var = tk.StringVar(value='fiasp')
+        type_frame = ttk.Frame(inner)
+        type_frame.grid(row=ins_type_row, column=1, columnspan=2, sticky='w', pady=5)
+        for label, val in [("Фиасп / Люмьев", 'fiasp'),
+                            ("Новорапид / НовоЛог", 'novorapid'),
+                            ("Хумалог / Апидра", 'humalog')]:
+            ttk.Radiobutton(type_frame, text=label,
+                            variable=self.insulin_type_var, value=val).pack(side='left', padx=(0, 10))
+
+        # ── Целевой сахар ─────────────────────────────────────────────────────
+        self._section(inner, "Целевой уровень сахара", nr())
+        self.target_glucose_min_var = self._field(inner, nr(),
+            "Целевой сахар, минимум (ммоль/л):",
+            "Нижняя граница целевого диапазона", "5.0")
+        self.target_glucose_max_var = self._field(inner, nr(),
+            "Целевой сахар, максимум (ммоль/л):",
+            "Верхняя граница целевого диапазона", "7.8")
+
+        # ── NightScout ────────────────────────────────────────────────────────
+        self._section(inner, "NightScout / CGM", nr())
+
+        ns_row = nr()
+        ttk.Label(inner, text="Включить NightScout:").grid(
+            row=ns_row, column=0, sticky='e', padx=(24, 8), pady=5)
+        self.ns_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(inner, variable=self.ns_enabled_var,
+                        command=self._on_ns_toggle).grid(
+            row=ns_row, column=1, sticky='w', pady=5)
+        ttk.Label(inner,
+                  text="При включении в калькуляторе появится индикатор CGM",
+                  foreground='gray', wraplength=340).grid(
+            row=ns_row, column=2, sticky='w', padx=(8, 16), pady=5)
+
+        url_row = nr()
+        ttk.Label(inner, text="URL сервера:").grid(
+            row=url_row, column=0, sticky='e', padx=(24, 8), pady=5)
+        self.ns_url_var = tk.StringVar()
+        ttk.Entry(inner, textvariable=self.ns_url_var, width=36).grid(
+            row=url_row, column=1, columnspan=2, sticky='w', pady=5, padx=(0, 16))
+
+        token_row = nr()
+        ttk.Label(inner, text="API Secret:").grid(
+            row=token_row, column=0, sticky='e', padx=(24, 8), pady=5)
+        self.ns_token_var = tk.StringVar()
+        token_entry = ttk.Entry(inner, textvariable=self.ns_token_var,
+                                width=36, show='*')
+        token_entry.grid(row=token_row, column=1, columnspan=2,
+                         sticky='w', pady=5, padx=(0, 16))
+        ttk.Label(inner,
+                  text="API Secret из настроек NightScout (не токен авторизации)",
+                  foreground='gray', wraplength=340).grid(
+            row=nr(), column=0, columnspan=3, sticky='w', padx=(24, 16), pady=(0, 4))
+
+        # Кнопка проверки связи
+        test_row = nr()
+        self.ns_test_btn = ttk.Button(inner, text="Проверить соединение",
+                                      command=self._test_ns_connection, width=22)
+        self.ns_test_btn.grid(row=test_row, column=1, sticky='w', pady=4)
+        self.ns_status_var = tk.StringVar(value="")
+        self.ns_status_lbl = ttk.Label(inner, textvariable=self.ns_status_var,
+                                        foreground='gray', wraplength=340)
+        self.ns_status_lbl.grid(row=test_row, column=2, sticky='w', padx=(8, 16))
+
+        # Кнопка сохранения
+        save_row = nr()
+        ttk.Button(inner, text="💾  Сохранить настройки",
+                   command=self.save_settings, style="Save.TButton"
+                   ).grid(row=save_row, column=0, columnspan=3, pady=20)
+
+        ttk.Label(inner,
+                  text="Настройки применяются сразу после сохранения.",
+                  foreground='gray'
+                  ).grid(row=nr(), column=0, columnspan=3, pady=(0, 20))
+
+    def _section(self, parent, title, row):
+        f = ttk.Frame(parent)
+        f.grid(row=row, column=0, columnspan=3, sticky='ew', padx=16, pady=(18, 4))
+        ttk.Label(f, text=title, font=FONT_BOLD).pack(side='left', padx=(0, 8))
+        ttk.Separator(f, orient='horizontal').pack(side='left', fill='x', expand=True)
+
+    def _field(self, parent, row, label, hint, default):
+        ttk.Label(parent, text=label).grid(
+            row=row, column=0, sticky='e', padx=(24, 8), pady=5)
+        var = tk.StringVar(value=default)
+        ttk.Entry(parent, textvariable=var, width=10).grid(
+            row=row, column=1, sticky='w', pady=5)
+        ttk.Label(parent, text=hint, foreground='gray',
+                  wraplength=340).grid(
+            row=row, column=2, sticky='w', padx=(8, 16), pady=5)
+        return var
+
+    def _on_ns_toggle(self):
+        """Меняет цвет статуса при включении/выключении."""
+        if not self.ns_enabled_var.get():
+            self.ns_status_var.set("")
+
+    # ── NS connection test ─────────────────────────────────────────────────────
+
+    def _test_ns_connection(self):
+        url   = self.ns_url_var.get().strip()
+        token = self.ns_token_var.get().strip()
+        if not url:
+            messagebox.showwarning("NightScout", "Введите URL сервера")
+            return
+        self.ns_test_btn.config(state='disabled')
+        self.ns_status_var.set("Проверяю соединение…")
+        self.ns_status_lbl.config(foreground='gray')
+
+        def _worker():
+            from nightscout import NightScoutClient, NightScoutConfig
+            client = NightScoutClient(NightScoutConfig(url=url, token=token, enabled=True))
+            ok, msg = client.check_connection()
+            self.after(0, lambda: self._on_test_done(ok, msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_test_done(self, ok: bool, msg: str):
+        self.ns_test_btn.config(state='normal')
+        self.ns_status_var.set(msg)
+        self.ns_status_lbl.config(foreground='#27ae60' if ok else '#c0392b')
+
+    # ── Загрузка / Сохранение ─────────────────────────────────────────────────
+
+    def load_settings(self):
+        s      = database.get_settings()
+        ns_cfg = database.get_ns_config()
+        target = s.get('target_glucose', 6.0)
+        self.carbs_per_xe_var.set(str(s.get('carbs_per_xe',       12)))
+        self.carb_coef_var.set(str(s.get('carb_coefficient',      1.0)))
+        self.sensitivity_var.set(str(s.get('sensitivity',          2.0)))
+        self.insulin_step_var.set(str(s.get('insulin_step',        0.5)))
+        self.insulin_type_var.set(str(s.get('insulin_type',        'fiasp')))
+        self.target_glucose_min_var.set(str(s.get('target_glucose_min', target)))
+        self.target_glucose_max_var.set(str(s.get('target_glucose_max', target)))
+        # NS
+        self.ns_enabled_var.set(ns_cfg.get('enabled', '0') == '1')
+        self.ns_url_var.set(ns_cfg.get('url', ''))
+        self.ns_token_var.set(ns_cfg.get('token', ''))
+
+    def save_settings(self):
+        try:
+            carbs_per_xe = float(self.carbs_per_xe_var.get())
+            carb_coef    = float(self.carb_coef_var.get())
+            sensitivity  = float(self.sensitivity_var.get())
+            insulin_step = float(self.insulin_step_var.get())
+            t_min        = float(self.target_glucose_min_var.get())
+            t_max        = float(self.target_glucose_max_var.get())
+        except ValueError:
+            messagebox.showerror("Ошибка", "Все числовые поля должны содержать числа")
+            return
+
+        if carbs_per_xe <= 0 or carb_coef <= 0 or sensitivity <= 0 or insulin_step <= 0:
+            messagebox.showerror("Ошибка", "Все значения должны быть положительными")
+            return
+        if t_min > t_max:
+            messagebox.showerror("Ошибка",
+                "Минимум целевого сахара не может быть больше максимума")
+            return
+
+        database.save_settings({
+            'carbs_per_xe':       carbs_per_xe,
+            'carb_coefficient':   carb_coef,
+            'sensitivity':        sensitivity,
+            'insulin_step':       insulin_step,
+            'target_glucose_min': t_min,
+            'target_glucose_max': t_max,
+            'target_glucose':     (t_min + t_max) / 2,
+        })
+        # insulin_type — строковая настройка, сохраняем через ns_config (TEXT-таблица)
+        database.save_ns_config(
+            url=self.ns_url_var.get().strip(),
+            token=self.ns_token_var.get().strip(),
+            enabled=self.ns_enabled_var.get(),
+        )
+        # Сохраняем тип инсулина отдельно через ns_config как строку
+        with database.get_connection() as conn:
+            database._ensure_ns_tables(conn)
+            conn.execute("INSERT OR REPLACE INTO ns_config (key, value) VALUES (?, ?)",
+                         ('insulin_type', self.insulin_type_var.get()))
+            conn.commit()
+
+        # Синхронизируем все вкладки
+        try:
+            nb = self.master
+            for tab_id in nb.tabs():
+                w = nb.nametowidget(tab_id)
+                if hasattr(w, 'load_settings') and w is not self:
+                    w.load_settings()
+        except Exception:
+            pass
+
+        messagebox.showinfo("Сохранено",
+            "Настройки сохранены.\n"
+            + ("NightScout включён — CGM-виджет появится в Калькуляторе."
+               if self.ns_enabled_var.get() else "NightScout отключён."))

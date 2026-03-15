@@ -57,7 +57,6 @@ def init_db():
             )
         ''')
 
-        # В функции init_db() обновите создание таблицы meals:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS meals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,13 +84,12 @@ def init_db():
             )
         ''')
 
-        # Таблица детального состава приёма пищи
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS meal_composition_details (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 meal_id INTEGER NOT NULL,
                 meal_component_id INTEGER NOT NULL,
-                product_id INTEGER,  -- изменено: разрешён NULL (для случаев, когда продукт удалён)
+                product_id INTEGER,
                 weight REAL NOT NULL,
                 is_part_of_dish BOOLEAN NOT NULL,
                 FOREIGN KEY (meal_id) REFERENCES meals(id) ON DELETE CASCADE,
@@ -100,12 +98,19 @@ def init_db():
             )
         ''')
 
+        # Таблица настроек — создаётся один раз здесь, не в get_settings/save_settings
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value REAL
+            )
+        ''')
+
         conn.commit()
 
 
+# ---- Продукты ----
 
-
-# ---- Функции для работы с продуктами ----
 def get_all_products():
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -149,7 +154,15 @@ def get_product(product_id):
         return cursor.fetchone()
 
 
-# ---- Функции для работы с кастрюлями ----
+def count_products():
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM products")
+        return cursor.fetchone()[0]
+
+
+# ---- Кастрюли ----
+
 def get_all_pans():
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -193,20 +206,14 @@ def get_pan(pan_id):
         return cursor.fetchone()
 
 
-def count_products():
-    """Возвращает количество продуктов в таблице."""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM products")
-        return cursor.fetchone()[0]
+# ---- Блюда ----
 
-
-# ---- Функции для работы с блюдами ----
 def get_all_dishes():
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM dishes ORDER BY name")
         return cursor.fetchall()
+
 
 def add_dish(name, default_pan_id=None, default_cooked_weight=None):
     with get_connection() as conn:
@@ -218,6 +225,7 @@ def add_dish(name, default_pan_id=None, default_cooked_weight=None):
         conn.commit()
         return cursor.lastrowid
 
+
 def update_dish(dish_id, name, default_pan_id=None, default_cooked_weight=None):
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -228,11 +236,13 @@ def update_dish(dish_id, name, default_pan_id=None, default_cooked_weight=None):
         ''', (name, default_pan_id, default_cooked_weight, dish_id))
         conn.commit()
 
+
 def delete_dish(dish_id):
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM dishes WHERE id=?", (dish_id,))
         conn.commit()
+
 
 def get_dish(dish_id):
     with get_connection() as conn:
@@ -240,7 +250,9 @@ def get_dish(dish_id):
         cursor.execute("SELECT * FROM dishes WHERE id=?", (dish_id,))
         return cursor.fetchone()
 
-# ---- Функции для состава блюда ----
+
+# ---- Состав блюда ----
+
 def get_dish_composition(dish_id):
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -253,6 +265,7 @@ def get_dish_composition(dish_id):
         ''', (dish_id,))
         return cursor.fetchall()
 
+
 def add_dish_composition(dish_id, product_id, weight):
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -261,6 +274,7 @@ def add_dish_composition(dish_id, product_id, weight):
             VALUES (?, ?, ?)
         ''', (dish_id, product_id, weight))
         conn.commit()
+
 
 def update_dish_composition(dish_id, product_id, weight):
     with get_connection() as conn:
@@ -272,6 +286,7 @@ def update_dish_composition(dish_id, product_id, weight):
         ''', (weight, dish_id, product_id))
         conn.commit()
 
+
 def delete_dish_composition(dish_id, product_id):
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -281,10 +296,11 @@ def delete_dish_composition(dish_id, product_id):
         ''', (dish_id, product_id))
         conn.commit()
 
-# ---- Функции для сохранения приёма пищи ----
-# Обновите функцию save_meal для сохранения уровня сахара
+
+# ---- Приёмы пищи ----
+
 def save_meal(datetime_str, insulin_dose, notes, components, glucose=None):
-    """Сохраняет приём пищи (обновлённая версия с glucose)."""
+    """Сохраняет приём пищи."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -320,10 +336,10 @@ def save_meal(datetime_str, insulin_dose, notes, components, glucose=None):
                         VALUES (?, ?, ?, ?, 1)
                     ''', (meal_id, comp_id, prod['product_id'], prod['weight']))
         conn.commit()
-        return meal_id# ---- Функции для работы с историей ----
-# ---- Функции для работы с историей ----
+        return meal_id
+
+
 def get_all_meals():
-    """Возвращает список всех приёмов пищи, отсортированных по дате (убывание)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -333,8 +349,8 @@ def get_all_meals():
         ''')
         return cursor.fetchall()
 
+
 def get_meal(meal_id):
-    """Возвращает данные о приёме (без состава)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -343,11 +359,12 @@ def get_meal(meal_id):
             WHERE id = ?
         ''', (meal_id,))
         return cursor.fetchone()
+
+
 def get_meal_components(meal_id):
     """Возвращает список компонентов приёма с деталями."""
     with get_connection() as conn:
         cursor = conn.cursor()
-        # Сначала получаем компоненты
         cursor.execute('''
             SELECT id, component_type, product_id, dish_id, serving_weight,
                    cooked_dish_weight, pan_id
@@ -357,20 +374,16 @@ def get_meal_components(meal_id):
         ''', (meal_id,))
         components = cursor.fetchall()
 
-        # Для каждого компонента получаем детальный состав
         result = []
         for comp in components:
             comp_dict = dict(comp)
             if comp_dict['component_type'] == 'product':
-                # Получаем название продукта
                 prod = get_product(comp_dict['product_id'])
-                comp_dict['product_name'] = prod['name'] if prod else '?'
-                comp_dict['details'] = []  # для продукта деталей нет
-            else:  # dish
-                # Получаем название блюда
+                comp_dict['product_name'] = prod['name'] if prod else '(удалён)'
+                comp_dict['details'] = []
+            else:
                 dish = get_dish(comp_dict['dish_id'])
-                comp_dict['dish_name'] = dish['name'] if dish else '?'
-                # Получаем детали состава этого блюда в приёме
+                comp_dict['dish_name'] = dish['name'] if dish else '(удалено)'
                 cursor.execute('''
                     SELECT product_id, weight, is_part_of_dish
                     FROM meal_composition_details
@@ -378,43 +391,38 @@ def get_meal_components(meal_id):
                 ''', (comp_dict['id'],))
                 details = cursor.fetchall()
                 comp_dict['details'] = [dict(d) for d in details]
-                # Добавляем названия продуктов в детали
                 for d in comp_dict['details']:
                     prod = get_product(d['product_id'])
-                    d['product_name'] = prod['name'] if prod else '?'
+                    d['product_name'] = prod['name'] if prod else '(удалён)'
             result.append(comp_dict)
         return result
 
+
 def delete_meal(meal_id):
-    """Удаляет приём пищи (каскадно удалятся компоненты и детали)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM meals WHERE id=?", (meal_id,))
         conn.commit()
 
-def update_meal(meal_id, datetime_str, insulin_dose, notes):
-    """Обновляет основные данные приёма."""
+
+def update_meal(meal_id, datetime_str, insulin_dose, glucose, notes):
+    """Обновляет основные данные приёма, включая уровень сахара."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             UPDATE meals
-            SET datetime=?, insulin_dose=?, notes=?
+            SET datetime=?, insulin_dose=?, glucose=?, notes=?
             WHERE id=?
-        ''', (datetime_str, insulin_dose, notes, meal_id))
+        ''', (datetime_str, insulin_dose, glucose, notes, meal_id))
         conn.commit()
 
+
+# ---- Настройки ----
 
 def get_settings():
     """Загружает настройки из базы данных."""
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value REAL
-            )
-        ''')
-
         settings = {}
         cursor.execute("SELECT key, value FROM settings")
         for key, value in cursor.fetchall():
@@ -426,16 +434,82 @@ def save_settings(settings_dict):
     """Сохраняет настройки в базу данных."""
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value REAL
-            )
-        ''')
-
         for key, value in settings_dict.items():
             cursor.execute('''
                 INSERT OR REPLACE INTO settings (key, value)
                 VALUES (?, ?)
             ''', (key, value))
         conn.commit()
+
+
+# ---- NightScout конфигурация ----
+# URL и токен хранятся в отдельной таблице ns_config (ключ-значение, TEXT),
+# потому что основная таблица settings использует REAL для числовых настроек.
+
+def _ensure_ns_tables(conn):
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS ns_config (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+    # Лог успешных отправок на NS — для отладки и повторной отправки
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS ns_sync_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            meal_id     INTEGER,
+            synced_at   TEXT NOT NULL,
+            status      TEXT NOT NULL,   -- 'ok' | 'error'
+            message     TEXT,
+            FOREIGN KEY (meal_id) REFERENCES meals(id) ON DELETE SET NULL
+        )
+    ''')
+
+
+def get_ns_config() -> dict:
+    """Возвращает {'url': ..., 'token': ..., 'enabled': '0'/'1'}."""
+    with get_connection() as conn:
+        _ensure_ns_tables(conn)
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM ns_config")
+        result = {row['key']: row['value'] for row in cursor.fetchall()}
+    return result
+
+
+def save_ns_config(url: str, token: str, enabled: bool):
+    """Сохраняет настройки NightScout."""
+    with get_connection() as conn:
+        _ensure_ns_tables(conn)
+        for key, value in [('url', url), ('token', token),
+                           ('enabled', '1' if enabled else '0')]:
+            conn.execute('''
+                INSERT OR REPLACE INTO ns_config (key, value) VALUES (?, ?)
+            ''', (key, value))
+        conn.commit()
+
+
+def log_ns_sync(meal_id, status: str, message: str = ''):
+    """Записывает результат синхронизации с NS."""
+    from datetime import datetime
+    with get_connection() as conn:
+        _ensure_ns_tables(conn)
+        conn.execute('''
+            INSERT INTO ns_sync_log (meal_id, synced_at, status, message)
+            VALUES (?, ?, ?, ?)
+        ''', (meal_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), status, message))
+        conn.commit()
+
+
+def get_ns_sync_log(limit: int = 50) -> list:
+    """Возвращает последние записи лога синхронизации."""
+    with get_connection() as conn:
+        _ensure_ns_tables(conn)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT l.id, l.meal_id, l.synced_at, l.status, l.message,
+                   m.datetime as meal_datetime
+            FROM ns_sync_log l
+            LEFT JOIN meals m ON l.meal_id = m.id
+            ORDER BY l.id DESC LIMIT ?
+        ''', (limit,))
+        return cursor.fetchall()

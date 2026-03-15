@@ -1,893 +1,811 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
+from datetime import datetime
+import threading
 import database
 from utils import calculate_product_nutrition, calculate_gn, calculate_xe
 from config import DEFAULT_CARBS_PER_XE
+from theme import FONT_BOLD, FONT_BIG, COLOR_ROW_EVEN, COLOR_ROW_ODD
+
+DATE_FORMAT = "%Y-%m-%d %H:%M"
+
+
+def _parse_datetime(s):
+    try:
+        return datetime.strptime(s.strip(), DATE_FORMAT)
+    except ValueError:
+        return None
 
 
 class CalculatorTab(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
-        self.components = []  # список компонентов текущего приёма
-        self.products_list = []  # список продуктов для диалогов
-        self.dishes_list = []  # список блюд
+        self.components   = []
+        self.products_list = []
+        self.dishes_list  = []
+        self.pans_list    = []
         self.carbs_per_xe = DEFAULT_CARBS_PER_XE
-        self.insulin_step = 0.5  # NEW: шаг дозирования инсулина (по умолчанию 0.5)
-
-        # Коэффициенты для расчёта инсулина (будут загружены из БД)
+        self.insulin_step = 0.5
         self.insulin_factors = {
-            'carb_coefficient': 1.0,  # ед инсулина на 1 ХЕ
-            'target_glucose': 6.0,  # целевой уровень сахара ммоль/л
-            'sensitivity': 2.0  # на сколько ммоль/л снижает 1 ед инсулина
+            'carb_coefficient': 1.0,
+            'target_glucose':   6.0,
+            'sensitivity':      2.0,
         }
-        self.insulin_food_var = tk.StringVar(value="0.0")
-        self.insulin_corr_var = tk.StringVar(value="0.0")
-        self.insulin_dose_var = tk.StringVar(value="0.0")
-
-        # NEW: переменные для отображения ближайших доз и выбора целевой
+        self.insulin_food_var  = tk.StringVar(value="0.0")
+        self.insulin_corr_var  = tk.StringVar(value="0.0")
+        self.insulin_dose_var  = tk.StringVar(value="0.0")
         self.insulin_lower_var = tk.StringVar(value="0.0")
         self.insulin_upper_var = tk.StringVar(value="0.0")
-        self.target_dose_var = tk.StringVar(value="lower")
+        self.target_dose_var   = tk.StringVar(value="lower")
+        self._trend_delta      = 0.0
+        self._glucose_from_cgm = False  # True если сахар подставлен CGM, False = ручной ввод
+        self.ns_widget         = None
 
         self.create_widgets()
         self.load_lists()
         self.load_settings()
-
-        # Привязываем событие появления вкладки для обновления списков
         self.bind('<Map>', self.on_tab_show)
 
     def on_tab_show(self, event):
-        """Вызывается при активации вкладки для обновления списков."""
         self.load_lists()
         self.load_settings()
 
     def load_settings(self):
-        """Загружает настройки из базы данных."""
-        settings = database.get_settings()
-        if settings:
-            self.insulin_factors['carb_coefficient'] = settings.get('carb_coefficient', 1.0)
-            self.insulin_factors['target_glucose'] = settings.get('target_glucose', 6.0)
-            self.insulin_factors['sensitivity'] = settings.get('sensitivity', 2.0)
-            self.carbs_per_xe = settings.get('carbs_per_xe', DEFAULT_CARBS_PER_XE)
-            self.insulin_step = settings.get('insulin_step', 0.5)  # NEW
+        s = database.get_settings()
+        if not s:
+            return
+        self.insulin_factors['carb_coefficient'] = s.get('carb_coefficient', 1.0)
+        self.insulin_factors['target_glucose']   = s.get('target_glucose', 6.0)
+        self.insulin_factors['sensitivity']      = s.get('sensitivity', 2.0)
+        self.carbs_per_xe = s.get('carbs_per_xe', DEFAULT_CARBS_PER_XE)
+        self.insulin_step = s.get('insulin_step', 0.5)
+        # Обновляем отображаемые поля (только те, что остались в калькуляторе)
+        self.carb_coef_var.set(str(self.insulin_factors['carb_coefficient']))
+        self.target_glucose_var.set(str(self.insulin_factors['target_glucose']))
+        self.sensitivity_var.set(str(self.insulin_factors['sensitivity']))
+        self.carbs_per_xe_var.set(str(self.carbs_per_xe))
+        self.update_insulin_dose()
 
-            # Обновляем поля ввода
-            self.carb_coef_var.set(str(self.insulin_factors['carb_coefficient']))
-            self.target_glucose_var.set(str(self.insulin_factors['target_glucose']))
-            self.sensitivity_var.set(str(self.insulin_factors['sensitivity']))
-            self.carbs_per_xe_var.set(str(self.carbs_per_xe))
-            self.insulin_step_var.set(str(self.insulin_step))  # NEW
+    # ── Автосохранение инлайн-полей калькулятора ─────────────────────────────
 
-    def save_insulin_settings(self):
-        """Сохраняет настройки инсулина в базу данных."""
+    def _save_field(self, key, var, old_val, positive=True, callback=None):
         try:
-            carb_coef = float(self.carb_coef_var.get())
-            target_glucose = float(self.target_glucose_var.get())
-            sensitivity = float(self.sensitivity_var.get())
-
-            # Загружаем текущие настройки, чтобы не потерять carbs_per_xe и insulin_step
-            settings = database.get_settings() or {}
-            settings.update({
-                'carb_coefficient': carb_coef,
-                'target_glucose': target_glucose,
-                'sensitivity': sensitivity
-            })
-            database.save_settings(settings)
-
-            self.insulin_factors['carb_coefficient'] = carb_coef
-            self.insulin_factors['target_glucose'] = target_glucose
-            self.insulin_factors['sensitivity'] = sensitivity
-
-            # Пересчитываем дозу инсулина
+            val = float(var.get())
+            if positive and val <= 0:
+                raise ValueError
+            s = database.get_settings() or {}
+            s[key] = val
+            database.save_settings(s)
+            if callback:
+                callback(val)
             self.update_insulin_dose()
-            messagebox.showinfo("Успех", "Настройки инсулина сохранены")
-
         except ValueError:
-            messagebox.showerror("Ошибка", "Проверьте правильность ввода коэффициентов")
+            var.set(str(old_val))
 
-    def save_xe_coefficient(self):
-        """Сохраняет коэффициент пересчёта ХЕ в базу данных."""
-        try:
-            val = float(self.carbs_per_xe_var.get())
-            if val <= 0:
-                messagebox.showerror("Ошибка", "Значение должно быть положительным")
-                self.carbs_per_xe_var.set(str(self.carbs_per_xe))
-                return
+    def save_carb_coef(self, e=None):
+        def cb(v): self.insulin_factors['carb_coefficient'] = v
+        self._save_field('carb_coefficient', self.carb_coef_var,
+                         self.insulin_factors['carb_coefficient'], callback=cb)
 
-            # Загружаем текущие настройки, чтобы не потерять остальные
-            settings = database.get_settings() or {}
-            settings['carbs_per_xe'] = val
-            database.save_settings(settings)
+    def save_target_glucose(self, e=None):
+        def cb(v): self.insulin_factors['target_glucose'] = v
+        self._save_field('target_glucose', self.target_glucose_var,
+                         self.insulin_factors['target_glucose'], callback=cb)
 
-            self.carbs_per_xe = val
+    def save_sensitivity(self, e=None):
+        def cb(v): self.insulin_factors['sensitivity'] = v
+        self._save_field('sensitivity', self.sensitivity_var,
+                         self.insulin_factors['sensitivity'], callback=cb)
 
-            # Пересчитываем итоги (ХЕ изменится)
+    def save_xe_coefficient(self, e=None):
+        def cb(v):
+            self.carbs_per_xe = v
             self.update_totals()
-            self.update_insulin_dose()
-            messagebox.showinfo("Успех", "Коэффициент ХЕ сохранён")
+        self._save_field('carbs_per_xe', self.carbs_per_xe_var, self.carbs_per_xe, callback=cb)
 
-        except ValueError:
-            messagebox.showerror("Ошибка", "Введите число")
-            self.carbs_per_xe_var.set(str(self.carbs_per_xe))
-
-    # NEW: сохранение шага дозирования
-    def save_insulin_step(self):
-        try:
-            val = float(self.insulin_step_var.get())
-            if val <= 0:
-                messagebox.showerror("Ошибка", "Шаг должен быть положительным числом")
-                self.insulin_step_var.set(str(self.insulin_step))
-                return
-            settings = database.get_settings() or {}
-            settings['insulin_step'] = val
-            database.save_settings(settings)
-            self.insulin_step = val
-            self.update_insulin_dose()  # обновим отображение вариантов
-            messagebox.showinfo("Успех", "Шаг дозирования сохранён")
-        except ValueError:
-            messagebox.showerror("Ошибка", "Введите число")
-            self.insulin_step_var.set(str(self.insulin_step))
+    # ── Компоновка ───────────────────────────────────────────────────────────
 
     def create_widgets(self):
-        # Создаём PanedWindow для разделения на верхнюю и нижнюю части
-        main_paned = ttk.PanedWindow(self, orient=tk.VERTICAL)
-        main_paned.pack(fill='both', expand=True, padx=5, pady=5)
+        # Главный вертикальный PanedWindow — верхняя часть (таблица) и нижняя (итоги+инсулин)
+        main_pw = ttk.PanedWindow(self, orient=tk.VERTICAL)
+        main_pw.pack(fill='both', expand=True, padx=6, pady=6)
 
-        # ==================== ВЕРХНЯЯ ЧАСТЬ ====================
-        top_frame = ttk.Frame(main_paned)
-        main_paned.add(top_frame, weight=2)
+        # ══ Верхняя область ══════════════════════════════════════════════════
+        top = ttk.Frame(main_pw)
+        main_pw.add(top, weight=3)
 
-        # Кнопки добавления
-        btn_frame = ttk.Frame(top_frame)
-        btn_frame.pack(fill='x', pady=(0, 5))
-
-        ttk.Button(btn_frame, text="+ Добавить блюдо", command=self.add_dish).pack(side='left', padx=2)
-        ttk.Button(btn_frame, text="+ Добавить продукт", command=self.add_product).pack(side='left', padx=2)
+        btn_frame = ttk.Frame(top)
+        btn_frame.pack(fill='x', pady=(0, 4))
+        ttk.Button(btn_frame, text="+ Блюдо",          command=self.add_dish).pack(side='left', padx=2)
+        ttk.Button(btn_frame, text="+ Продукт",        command=self.add_product).pack(side='left', padx=2)
         ttk.Button(btn_frame, text="Удалить выбранное", command=self.delete_component).pack(side='left', padx=2)
+        ttk.Button(btn_frame, text="Очистить всё",      command=self.clear_all).pack(side='left', padx=12)
 
-        # Таблица состава приёма
-        columns = ('adjust', 'name', 'calories', 'proteins', 'fats', 'carbs', 'gn', 'weight')  # NEW: добавили adjust
-        self.tree = ttk.Treeview(top_frame, columns=columns, show='headings', height=10)
+        cols = ('adjust', 'name', 'calories', 'proteins', 'fats', 'carbs', 'carbs_amount', 'gn', 'weight')
+        self.tree = ttk.Treeview(top, columns=cols, show='headings', style="App.Treeview")
+        specs = [
+            ('adjust',       'Корр.',         52, 'center', False),
+            ('name',         'Название',      240, 'w',     True),
+            ('calories',     'Ккал/100г',      80, 'center', False),
+            ('proteins',     'Б/100г',         65, 'center', False),
+            ('fats',         'Ж/100г',         65, 'center', False),
+            ('carbs',        'У/100г',         65, 'center', False),
+            ('carbs_amount', 'Углеводы (г)',   90, 'center', False),
+            ('gn',           'ГН/100г',        72, 'center', False),
+            ('weight',       'Вес порции (г)', 100, 'center', False),
+        ]
+        for col, text, w, anchor, stretch in specs:
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=w, anchor=anchor, minwidth=40, stretch=stretch)
 
-        # Настройка заголовков
-        self.tree.heading('adjust', text='Корр.')
-        self.tree.heading('name', text='Название')
-        self.tree.heading('calories', text='Ккал/100г')
-        self.tree.heading('proteins', text='Б/100г')
-        self.tree.heading('fats', text='Ж/100г')
-        self.tree.heading('carbs', text='У/100г')
-        self.tree.heading('gn', text='ГН/100г')
-        self.tree.heading('weight', text='Вес порции (г)')
+        self.tree.tag_configure('dish',    font=FONT_BOLD, background=COLOR_ROW_EVEN)
+        self.tree.tag_configure('product', background=COLOR_ROW_ODD)
 
-        # Настройка ширины колонок
-        self.tree.column('adjust', width=50, anchor='center')
-        self.tree.column('name', width=250, anchor='w')
-        self.tree.column('calories', width=80, anchor='center')
-        self.tree.column('proteins', width=60, anchor='center')
-        self.tree.column('fats', width=60, anchor='center')
-        self.tree.column('carbs', width=60, anchor='center')
-        self.tree.column('gn', width=70, anchor='center')
-        self.tree.column('weight', width=100, anchor='center')
+        vsb = ttk.Scrollbar(top, orient='vertical', command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side='left', fill='both', expand=True)
+        vsb.pack(side='right', fill='y')
 
-        # Настраиваем теги для чередования фона
-        self.tree.tag_configure('oddrow', background='#f0f0f0')
-        self.tree.tag_configure('evenrow', background='#ffffff')
-        self.tree.tag_configure('dish', font=('Arial', 10, 'bold'))
-        self.tree.tag_configure('product', font=('Arial', 10))
-
-        # Привязываем двойной щелчок для редактирования веса
         self.tree.bind('<Double-1>', self.on_item_double_click)
-        # NEW: привязываем клик для чекбоксов
         self.tree.bind('<Button-1>', self.on_tree_click)
 
-        # Скроллбар для таблицы
-        scrollbar = ttk.Scrollbar(top_frame, orient='vertical', command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        # ══ Нижняя область ═══════════════════════════════════════════════════
+        bottom_pw = ttk.PanedWindow(main_pw, orient=tk.HORIZONTAL)
+        main_pw.add(bottom_pw, weight=1)
 
-        # Размещаем таблицу и скроллбар
-        self.tree.pack(side='left', fill='both', expand=True)
-        scrollbar.pack(side='right', fill='y')
+        # ── Итоги (левая часть низа) ──────────────────────────────────────────
+        totals_frame = ttk.LabelFrame(bottom_pw, text="Итого за приём", padding=8)
+        bottom_pw.add(totals_frame, weight=2)
 
-        # ==================== НИЖНЯЯ ЧАСТЬ ====================
-        bottom_frame = ttk.Frame(main_paned, relief='raised', padding=5)
-        main_paned.add(bottom_frame, weight=1)
+        self.total_vars = {k: tk.StringVar(value='0.0')
+                           for k in ('calories', 'proteins', 'fats', 'carbs', 'gn', 'xe')}
 
-        # Левая часть нижней панели - итоговые КБЖУ
-        left_bottom = ttk.Frame(bottom_frame)
-        left_bottom.pack(side='left', fill='both', expand=True)
+        rows_data = [
+            [("Калории:",  'calories', "ккал"), ("Белки:",  'proteins', "г")],
+            [("Жиры:",     'fats',     "г"),    ("Углеводы:", 'carbs',  "г")],
+            [("ГН:",       'gn',       ""),     ("ХЕ:",     'xe',       "")],
+        ]
+        for r, row in enumerate(rows_data):
+            for c_base, (lbl, key, unit) in enumerate(row):
+                col = c_base * 3
+                ttk.Label(totals_frame, text=lbl).grid(
+                    row=r, column=col, sticky='e', padx=(8, 2), pady=3)
+                ttk.Label(totals_frame, textvariable=self.total_vars[key],
+                          font=FONT_BOLD, width=8, anchor='e').grid(
+                    row=r, column=col+1, sticky='w')
+                ttk.Label(totals_frame, text=unit, foreground='gray').grid(
+                    row=r, column=col+2, sticky='w', padx=(2, 14))
 
-        ttk.Label(left_bottom, text="ИТОГО:", font=('Arial', 11, 'bold')).pack(anchor='w', pady=(0, 5))
+        # Подсказка по времени укола
+        self.timing_var = tk.StringVar(value="")
+        self.timing_lbl = ttk.Label(totals_frame, textvariable=self.timing_var,
+                                     foreground='#e67e22', wraplength=320,
+                                     font=('Segoe UI', 9, 'italic'))
+        self.timing_lbl.grid(row=4, column=0, columnspan=6,
+                              sticky='w', padx=8, pady=(4, 0))
 
-        # Создаём переменные для итогов
-        self.total_vars = {
-            'calories': tk.StringVar(value='0.0'),
-            'proteins': tk.StringVar(value='0.0'),
-            'fats': tk.StringVar(value='0.0'),
-            'carbs': tk.StringVar(value='0.0'),
-            'gn': tk.StringVar(value='0.0'),
-            'xe': tk.StringVar(value='0.0')
-        }
+        ttk.Button(totals_frame, text="💾  Записать приём",
+                   command=self.save_meal, style="Save.TButton"
+                   ).grid(row=5, column=0, columnspan=6,
+                           pady=(8, 4), sticky='w', padx=8)
 
-        # Сетка для итогов
-        total_frame = ttk.Frame(left_bottom)
-        total_frame.pack(fill='x', pady=5)
+        # ── Расчёт инсулина (правая часть низа) ──────────────────────────────
+        ins_frame = ttk.LabelFrame(bottom_pw, text="Расчёт инсулина", padding=(8, 6))
+        bottom_pw.add(ins_frame, weight=1)
+        ins_frame.columnconfigure(1, weight=0)
+        ins_frame.columnconfigure(3, weight=1)
 
-        row1 = ttk.Frame(total_frame)
-        row1.pack(fill='x', pady=2)
-        ttk.Label(row1, text="Калории:", width=15).pack(side='left')
-        ttk.Label(row1, textvariable=self.total_vars['calories'], width=10, anchor='e').pack(side='left')
-        ttk.Label(row1, text="ккал", width=5).pack(side='left')
+        # ── CGM-виджет ────────────────────────────────────────────────────────
+        from ns_glucose_widget import NSGlucoseWidget
+        self.ns_widget = NSGlucoseWidget(
+            ins_frame,
+            on_glucose_ready=self._on_cgm_glucose,
+            compact=True,
+        )
+        self.ns_widget.grid(row=0, column=0, columnspan=4, sticky='ew', pady=(0, 4))
 
-        ttk.Label(row1, text="Белки:", width=15).pack(side='left', padx=(20, 0))
-        ttk.Label(row1, textvariable=self.total_vars['proteins'], width=10, anchor='e').pack(side='left')
-        ttk.Label(row1, text="г", width=5).pack(side='left')
+        ttk.Separator(ins_frame, orient='horizontal').grid(
+            row=1, column=0, columnspan=4, sticky='ew', pady=2)
 
-        row2 = ttk.Frame(total_frame)
-        row2.pack(fill='x', pady=2)
-        ttk.Label(row2, text="Жиры:", width=15).pack(side='left')
-        ttk.Label(row2, textvariable=self.total_vars['fats'], width=10, anchor='e').pack(side='left')
-        ttk.Label(row2, text="г", width=5).pack(side='left')
-
-        ttk.Label(row2, text="Углеводы:", width=15).pack(side='left', padx=(20, 0))
-        ttk.Label(row2, textvariable=self.total_vars['carbs'], width=10, anchor='e').pack(side='left')
-        ttk.Label(row2, text="г", width=5).pack(side='left')
-
-        row3 = ttk.Frame(total_frame)
-        row3.pack(fill='x', pady=2)
-        ttk.Label(row3, text="ГН:", width=15).pack(side='left')
-        ttk.Label(row3, textvariable=self.total_vars['gn'], width=10, anchor='e').pack(side='left')
-
-        ttk.Label(row3, text="ХЕ:", width=15).pack(side='left', padx=(20, 0))
-        ttk.Label(row3, textvariable=self.total_vars['xe'], width=10, anchor='e').pack(side='left')
-
-        # Правая часть нижней панели - расчёт инсулина и настройки
-        right_bottom = ttk.Frame(bottom_frame, relief='groove', padding=10)
-        right_bottom.pack(side='right', fill='both', padx=(10, 0))
-
-        ttk.Label(right_bottom, text="РАСЧЁТ ИНСУЛИНА", font=('Arial', 11, 'bold')).pack(anchor='w', pady=(0, 10))
-
-        # Коэффициенты
-        coef_frame = ttk.Frame(right_bottom)
-        coef_frame.pack(fill='x', pady=5)
-
-        # Коэффициент на ХЕ
-        ttk.Label(coef_frame, text="1 ед на ХЕ:").grid(row=0, column=0, sticky='w', pady=2)
-        self.carb_coef_var = tk.StringVar(value=str(self.insulin_factors['carb_coefficient']))
-        ttk.Entry(coef_frame, textvariable=self.carb_coef_var, width=8).grid(row=0, column=1, padx=5)
-        ttk.Button(coef_frame, text="✓", command=self.save_insulin_settings, width=3).grid(row=0, column=2)
-
-        # Целевой сахар
-        ttk.Label(coef_frame, text="Цель ммоль/л:").grid(row=1, column=0, sticky='w', pady=2)
-        self.target_glucose_var = tk.StringVar(value=str(self.insulin_factors['target_glucose']))
-        ttk.Entry(coef_frame, textvariable=self.target_glucose_var, width=8).grid(row=1, column=1, padx=5)
-
-        # Чувствительность
-        ttk.Label(coef_frame, text="1 ед снижает на:").grid(row=2, column=0, sticky='w', pady=2)
-        self.sensitivity_var = tk.StringVar(value=str(self.insulin_factors['sensitivity']))
-        ttk.Entry(coef_frame, textvariable=self.sensitivity_var, width=8).grid(row=2, column=1, padx=5)
-
-        # --- NEW: шаг дозирования ---
-        ttk.Label(coef_frame, text="Шаг ручки (ед):").grid(row=5, column=0, sticky='w', pady=2)
-        self.insulin_step_var = tk.StringVar(value=str(self.insulin_step))
-        ttk.Entry(coef_frame, textvariable=self.insulin_step_var, width=8).grid(row=5, column=1, padx=5)
-        ttk.Button(coef_frame, text="✓", command=self.save_insulin_step, width=3).grid(row=5, column=2)
-
-        # --- Коэффициент ХЕ ---
-        ttk.Label(coef_frame, text="1 ХЕ = г углеводов:").grid(row=3, column=0, sticky='w', pady=2)
-        self.carbs_per_xe_var = tk.StringVar(value=str(self.carbs_per_xe))
-        ttk.Entry(coef_frame, textvariable=self.carbs_per_xe_var, width=8).grid(row=3, column=1, padx=5)
-        ttk.Button(coef_frame, text="✓", command=self.save_xe_coefficient, width=3).grid(row=3, column=2)
-
-        # Текущий сахар
-        ttk.Label(coef_frame, text="Текущий сахар:").grid(row=4, column=0, sticky='w', pady=(10, 2))
+        # ── Коэффициенты — две колонки ────────────────────────────────────────
+        self.carb_coef_var       = tk.StringVar(value=str(self.insulin_factors['carb_coefficient']))
+        self.target_glucose_var  = tk.StringVar(value=str(self.insulin_factors['target_glucose']))
+        self.sensitivity_var     = tk.StringVar(value=str(self.insulin_factors['sensitivity']))
+        self.carbs_per_xe_var    = tk.StringVar(value=str(self.carbs_per_xe))
         self.current_glucose_var = tk.StringVar()
-        ttk.Entry(coef_frame, textvariable=self.current_glucose_var, width=8).grid(row=4, column=1, padx=5)
-        self.current_glucose_var.trace('w', lambda *args: self.update_insulin_dose())
 
-        # Результат
-        result_frame = ttk.Frame(right_bottom)
-        result_frame.pack(fill='x', pady=5)
+        def _lbl(r, c, text):
+            ttk.Label(ins_frame, text=text).grid(
+                row=r, column=c, sticky='e', padx=(6, 2), pady=2)
 
-        # Доза на еду
-        food_frame = ttk.Frame(right_bottom)
-        food_frame.pack(fill='x')
-        ttk.Label(food_frame, text="На еду:", width=15).pack(side='left')
-        self.insulin_food_var = tk.StringVar(value="0.0")
-        ttk.Label(food_frame, textvariable=self.insulin_food_var, width=8, anchor='e').pack(side='left')
-        ttk.Label(food_frame, text="ед").pack(side='left')
+        def _ent(r, c, var, save_fn=None):
+            e = ttk.Entry(ins_frame, textvariable=var, width=7)
+            e.grid(row=r, column=c, sticky='w', pady=2, padx=(0, 6))
+            if save_fn:
+                e.bind('<FocusOut>', save_fn)
+                e.bind('<Return>',   save_fn)
+            return e
 
-        # Коррекция
-        corr_frame = ttk.Frame(right_bottom)
-        corr_frame.pack(fill='x', pady=2)
-        ttk.Label(corr_frame, text="Коррекция:", width=15).pack(side='left')
-        self.insulin_corr_var = tk.StringVar(value="0.0")
-        ttk.Label(corr_frame, textvariable=self.insulin_corr_var, width=8, anchor='e').pack(side='left')
-        ttk.Label(corr_frame, text="ед").pack(side='left')
+        _lbl(2, 0, "ед на 1 ХЕ:");        _ent(2, 1, self.carb_coef_var,      self.save_carb_coef)
+        _lbl(2, 2, "Цель (ммоль/л):");    _ent(2, 3, self.target_glucose_var, self.save_target_glucose)
+        _lbl(3, 0, "1 ед снижает:");      _ent(3, 1, self.sensitivity_var,    self.save_sensitivity)
+        _lbl(3, 2, "1 ХЕ = г углев.:");   _ent(3, 3, self.carbs_per_xe_var,   self.save_xe_coefficient)
+        _lbl(4, 0, "Текущий сахар:");
+        _ent(4, 1, self.current_glucose_var)
+        ttk.Label(ins_frame, text="ммоль/л", foreground='gray').grid(
+            row=4, column=2, columnspan=2, sticky='w')
+        self.current_glucose_var.trace('w', lambda *_: self.update_insulin_dose())
 
-        # Общая доза (жирным)
-        total_frame_label = ttk.Frame(right_bottom)
-        total_frame_label.pack(fill='x', pady=(5, 10))
-        ttk.Label(total_frame_label, text="ИТОГО:", font=('Arial', 10, 'bold')).pack(side='left')
-        ttk.Label(total_frame_label, textvariable=self.insulin_dose_var, font=('Arial', 12, 'bold'),
-                  foreground='blue').pack(side='left', padx=5)
-        ttk.Label(total_frame_label, text="ед").pack(side='left')
+        ttk.Separator(ins_frame, orient='horizontal').grid(
+            row=5, column=0, columnspan=4, sticky='ew', pady=3)
 
-        # --- NEW: панель коррекции дозы ---
-        adjust_frame = ttk.LabelFrame(right_bottom, text="Коррекция дозы", padding=5)
-        adjust_frame.pack(fill='x', pady=5)
+        # ── Результаты — горизонтальная строка ────────────────────────────────
+        res = ttk.Frame(ins_frame)
+        res.grid(row=6, column=0, columnspan=4, sticky='ew', pady=(2, 0))
 
-        # Радиокнопки выбора целевой дозы
-        ttk.Radiobutton(adjust_frame, text="Меньше: ", variable=self.target_dose_var, value="lower").pack(anchor='w')
-        ttk.Label(adjust_frame, textvariable=self.insulin_lower_var).pack(anchor='w', padx=(20,0))
+        def _rcell(parent, lbl_text, var, col, big=False, fg=None):
+            ttk.Label(parent, text=lbl_text, foreground='gray',
+                      font=('Segoe UI', 8)).grid(row=0, column=col, sticky='s', padx=(4, 1))
+            kw = dict(font=FONT_BIG if big else FONT_BOLD, anchor='e', width=5)
+            if fg: kw['foreground'] = fg
+            ttk.Label(parent, textvariable=var, **kw).grid(
+                row=1, column=col, sticky='n', padx=(4, 0))
+            ttk.Label(parent, text="ед", foreground='gray',
+                      font=('Segoe UI', 8)).grid(row=1, column=col+1, sticky='sw', padx=(1, 4))
 
-        ttk.Radiobutton(adjust_frame, text="Больше: ", variable=self.target_dose_var, value="upper").pack(anchor='w')
-        ttk.Label(adjust_frame, textvariable=self.insulin_upper_var).pack(anchor='w', padx=(20,0))
+        _rcell(res, "На еду",    self.insulin_food_var,  0)
+        _rcell(res, "Коррекция", self.insulin_corr_var,  2)
 
-        # Кнопка выполнения коррекции
-        ttk.Button(adjust_frame, text="Скорректировать еду", command=self.adjust_meal).pack(pady=5)
+        self.trend_dose_var  = tk.StringVar(value="0.0")
+        self.trend_res_lbl   = ttk.Label(res, text="Тренд", foreground='gray', font=('Segoe UI', 8))
+        self.trend_res_val   = ttk.Label(res, textvariable=self.trend_dose_var,
+                                          font=FONT_BOLD, width=5, anchor='e', foreground='#e67e22')
+        self.trend_res_unit  = ttk.Label(res, text="ед", foreground='gray', font=('Segoe UI', 8))
+        self._trend_row_visible = False
 
-        # Кнопка сохранения приёма
-        ttk.Button(right_bottom, text="💾 Записать приём", command=self.save_meal).pack(pady=5)
+        ttk.Separator(res, orient='vertical').grid(
+            row=0, column=6, rowspan=2, sticky='ns', padx=4)
+        _rcell(res, "ИТОГО", self.insulin_dose_var, 7, big=True, fg='#1a6fc4')
+
+        # ── Округление — однострочно ──────────────────────────────────────────
+        adj = ttk.Frame(ins_frame)
+        adj.grid(row=7, column=0, columnspan=4, sticky='ew', pady=(4, 2))
+
+        ttk.Radiobutton(adj, text="↓", variable=self.target_dose_var,
+                        value="lower").pack(side='left')
+        ttk.Label(adj, textvariable=self.insulin_lower_var,
+                  font=FONT_BOLD, width=5, anchor='e').pack(side='left')
+        ttk.Label(adj, text="ед", foreground='gray').pack(side='left', padx=(0, 8))
+        ttk.Radiobutton(adj, text="↑", variable=self.target_dose_var,
+                        value="upper").pack(side='left')
+        ttk.Label(adj, textvariable=self.insulin_upper_var,
+                  font=FONT_BOLD, width=5, anchor='e').pack(side='left')
+        ttk.Label(adj, text="ед", foreground='gray').pack(side='left', padx=(0, 8))
+        ttk.Button(adj, text="Скорректировать",
+                   command=self.adjust_meal).pack(side='left', padx=4)
+
+    # ── Загрузка данных ───────────────────────────────────────────────────────
 
     def load_lists(self):
-        """Загружает списки продуктов и блюд."""
         prods = database.get_all_products()
         self.products_list = [(p['id'], p['name'], p) for p in prods]
 
+        pans = database.get_all_pans()
+        self.pans_list = [(p['id'], p['name'], p['weight']) for p in pans]
+
         dishes = database.get_all_dishes()
         self.dishes_list = []
-        for dish_id, dish_name in [(d['id'], d['name']) for d in dishes]:
-            composition = database.get_dish_composition(dish_id)
-            # Рассчитываем КБЖУ на 100 г
-            nutrition = self._calculate_dish_nutrition_per_100(composition)
-            self.dishes_list.append((dish_id, dish_name, composition, nutrition))
+        for dish in dishes:
+            comp = database.get_dish_composition(dish['id'])
+            pw   = self._get_pan_weight(dish['default_pan_id'])
+            nw   = None
+            if dish['default_cooked_weight'] and pw is not None:
+                nw = dish['default_cooked_weight'] - pw
+                if nw <= 0:
+                    nw = None
+            nut = self._calc_dish_nut_per100(comp, nw)
+            self.dishes_list.append((dish['id'], dish['name'], comp, nut))
 
-    def _calculate_dish_nutrition_per_100(self, composition):
-        """Рассчитывает КБЖУ и ГН блюда на 100 г."""
-        total_calories = 0
-        total_proteins = 0
-        total_fats = 0
-        total_carbs = 0
-        total_gn = 0
-        total_weight = 0
-
-        for item in composition:
-            prod = database.get_product(item['product_id'])
-            if prod:
-                nut = calculate_product_nutrition(prod, item['weight'])
-                total_calories += nut['calories']
-                total_proteins += nut['proteins']
-                total_fats += nut['fats']
-                total_carbs += nut['carbs']
-                total_gn += calculate_gn(nut['carbs'], prod['glycemic_index'])
-                total_weight += item['weight']
-
-        if total_weight > 0:
-            factor_100 = 100 / total_weight
-            return {
-                'calories': total_calories * factor_100,
-                'proteins': total_proteins * factor_100,
-                'fats': total_fats * factor_100,
-                'carbs': total_carbs * factor_100,
-                'gn': total_gn * factor_100
-            }
+    def _get_pan_weight(self, pan_id):
+        if not pan_id:
+            return None
+        for pid, _, w in self.pans_list:
+            if pid == pan_id:
+                return w
         return None
 
+    def _calc_dish_nut_per100(self, composition, net_weight=None):
+        tc = tp = tf = tcarb = tgn = tiw = 0.0
+        for item in composition:
+            p = database.get_product(item['product_id'])
+            if p:
+                n = calculate_product_nutrition(p, item['weight'])
+                tc   += n['calories']; tp += n['proteins']
+                tf   += n['fats'];     tcarb += n['carbs']
+                tgn  += calculate_gn(n['carbs'], p['glycemic_index'])
+                tiw  += item['weight']
+        div = net_weight if (net_weight and net_weight > 0) else tiw
+        if div > 0:
+            f = 100 / div
+            return dict(calories=tc*f, proteins=tp*f, fats=tf*f, carbs=tcarb*f, gn=tgn*f)
+        return None
+
+    # ── Диалог выбора ────────────────────────────────────────────────────────
+
+    def _selection_dialog(self, title, items, label):
+        """items = [(display_name, value), ...]  →  returns value or None"""
+        dlg = tk.Toplevel(self)
+        dlg.title(title); dlg.transient(self); dlg.grab_set()
+        dlg.geometry("420x520")
+
+        ttk.Label(dlg, text=label, font=FONT_BOLD).pack(pady=(10, 4))
+
+        sv = tk.StringVar()
+        se = ttk.Entry(dlg, textvariable=sv, width=40)
+        se.pack(padx=10, pady=(0, 6))
+        se.focus_set()
+
+        lf = ttk.Frame(dlg); lf.pack(fill='both', expand=True, padx=10, pady=4)
+        vsb = ttk.Scrollbar(lf, orient='vertical'); vsb.pack(side='right', fill='y')
+        lb  = tk.Listbox(lf, yscrollcommand=vsb.set, font=('Segoe UI', 10),
+                         activestyle='dotbox', selectbackground='#0078d7',
+                         selectforeground='white')
+        lb.pack(side='left', fill='both', expand=True)
+        vsb.config(command=lb.yview)
+
+        all_names = [name for name, _ in items]
+
+        def refresh(*_):
+            q = sv.get().lower()
+            lb.delete(0, tk.END)
+            for n in all_names:
+                if q in n.lower():
+                    lb.insert(tk.END, n)
+
+        sv.trace('w', refresh); refresh()
+
+        chosen = [None]
+
+        def pick():
+            sel = lb.curselection()
+            if not sel:
+                return
+            name = lb.get(sel[0])
+            for n, v in items:
+                if n == name:
+                    chosen[0] = v; break
+            dlg.destroy()
+
+        lb.bind('<Double-1>', lambda e: pick())
+        se.bind('<Return>',   lambda e: pick())
+
+        bf = ttk.Frame(dlg); bf.pack(pady=10)
+        ttk.Button(bf, text="Выбрать", command=pick,        width=14).pack(side='left', padx=5)
+        ttk.Button(bf, text="Отмена",  command=dlg.destroy, width=14).pack(side='left', padx=5)
+
+        dlg.wait_window()
+        return chosen[0]
+
+    # ── Добавление / удаление ─────────────────────────────────────────────────
+
     def add_dish(self):
-        """Добавление блюда в приём."""
         if not self.dishes_list:
             messagebox.showwarning("Предупреждение", "Сначала создайте хотя бы одно блюдо")
             return
-
-        # Диалог выбора блюда
-        dialog = tk.Toplevel(self)
-        dialog.title("Выберите блюдо")
-        dialog.transient(self)
-        dialog.grab_set()
-        dialog.geometry("400x500")
-
-        ttk.Label(dialog, text="Выберите блюдо из списка:", font=('Arial', 10, 'bold')).pack(pady=5)
-
-        # Список блюд
-        list_frame = ttk.Frame(dialog)
-        list_frame.pack(fill='both', expand=True, padx=10, pady=5)
-
-        scrollbar = ttk.Scrollbar(list_frame, orient='vertical')
-        scrollbar.pack(side='right', fill='y')
-
-        listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, font=('Arial', 10))
-        listbox.pack(side='left', fill='both', expand=True)
-        scrollbar.config(command=listbox.yview)
-
-        # Заполняем список (только названия)
-        for _, name, _, _ in self.dishes_list:
-            listbox.insert(tk.END, name)
-
-        def select():
-            sel = listbox.curselection()
-            if not sel:
-                return
-            dish_id, dish_name, composition, nutrition = self.dishes_list[sel[0]]
-
-            # Добавляем в таблицу
-            tag = 'dish'
-            if nutrition:
-                tree_id = self.tree.insert('', 'end',
-                                 values=(
-                                     '☑',  # NEW: по умолчанию отмечено
-                                     f"🍲 {dish_name}",
-                                     f"{nutrition['calories']:.0f}",
-                                     f"{nutrition['proteins']:.1f}",
-                                     f"{nutrition['fats']:.1f}",
-                                     f"{nutrition['carbs']:.1f}",
-                                     f"{nutrition['gn']:.1f}",
-                                     ""
-                                 ),
-                                 tags=(tag,)
-                                 )
-
-                # Сохраняем данные компонента
-                self.components.append({
-                    'type': 'dish',
-                    'id': dish_id,
-                    'name': dish_name,
-                    'composition': composition,
-                    'nutrition_per_100': nutrition,
-                    'serving_weight': None,
-                    'tree_id': tree_id,
-                    'adjustable': True  # NEW
-                })
-
-            dialog.destroy()
-
-        btn_frame = ttk.Frame(dialog)
-        btn_frame.pack(fill='x', pady=10)
-        ttk.Button(btn_frame, text="Выбрать", command=select, width=15).pack(side='left', padx=5)
-        ttk.Button(btn_frame, text="Отмена", command=dialog.destroy, width=15).pack(side='left', padx=5)
+        items = [(name, (did, name, comp, nut))
+                 for did, name, comp, nut in self.dishes_list]
+        res = self._selection_dialog("Выбор блюда", items, "Выберите блюдо:")
+        if res is None:
+            return
+        dish_id, dish_name, composition, nutrition = res
+        if nutrition is None:
+            messagebox.showerror("Ошибка",
+                f"Блюдо «{dish_name}» не настроено полностью.\n"
+                "Задайте вес готового блюда и кастрюлю во вкладке «Блюда».")
+            return
+        tree_id = self.tree.insert('', 'end', tags=('dish',), values=(
+            '☑', f"🍲 {dish_name}",
+            f"{nutrition['calories']:.0f}", f"{nutrition['proteins']:.1f}",
+            f"{nutrition['fats']:.1f}",     f"{nutrition['carbs']:.1f}",
+            "0", f"{nutrition['gn']:.1f}",  "",
+        ))
+        self.components.append(dict(type='dish', id=dish_id, name=dish_name,
+            composition=composition, nutrition_per_100=nutrition,
+            serving_weight=None, tree_id=tree_id, adjustable=True))
 
     def add_product(self):
-        """Добавление отдельного продукта."""
         if not self.products_list:
-            messagebox.showwarning("Предупреждение", "Сначала создайте хотя бы один продукт")
+            messagebox.showwarning("Предупреждение", "Сначала добавьте продукты во вкладке «Продукты»")
             return
-
-        dialog = tk.Toplevel(self)
-        dialog.title("Выберите продукт")
-        dialog.transient(self)
-        dialog.grab_set()
-        dialog.geometry("400x500")
-
-        ttk.Label(dialog, text="Выберите продукт из списка:", font=('Arial', 10, 'bold')).pack(pady=5)
-
-        list_frame = ttk.Frame(dialog)
-        list_frame.pack(fill='both', expand=True, padx=10, pady=5)
-
-        scrollbar = ttk.Scrollbar(list_frame, orient='vertical')
-        scrollbar.pack(side='right', fill='y')
-
-        listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, font=('Arial', 10))
-        listbox.pack(side='left', fill='both', expand=True)
-        scrollbar.config(command=listbox.yview)
-
-        # Заполняем список (только названия)
-        for _, name, _ in self.products_list:
-            listbox.insert(tk.END, name)
-
-        def select():
-            sel = listbox.curselection()
-            if not sel:
-                return
-            prod_id, prod_name, prod_data = self.products_list[sel[0]]
-
-            # Добавляем в таблицу
-            tag = 'product'
-            tree_id = self.tree.insert('', 'end',
-                             values=(
-                                 '☑',  # NEW: по умолчанию отмечено
-                                 f"🍎 {prod_name}",
-                                 f"{prod_data['calories']:.0f}",
-                                 f"{prod_data['proteins']:.1f}",
-                                 f"{prod_data['fats']:.1f}",
-                                 f"{prod_data['carbs']:.1f}",
-                                 f"{calculate_gn(prod_data['carbs'], prod_data['glycemic_index']):.1f}",
-                                 ""
-                             ),
-                             tags=(tag,)
-                             )
-
-            # Сохраняем данные компонента
-            self.components.append({
-                'type': 'product',
-                'id': prod_id,
-                'name': prod_name,
-                'product_data': prod_data,
-                'serving_weight': None,
-                'tree_id': tree_id,
-                'adjustable': True  # NEW
-            })
-
-            dialog.destroy()
-
-        btn_frame = ttk.Frame(dialog)
-        btn_frame.pack(fill='x', pady=10)
-        ttk.Button(btn_frame, text="Выбрать", command=select, width=15).pack(side='left', padx=5)
-        ttk.Button(btn_frame, text="Отмена", command=dialog.destroy, width=15).pack(side='left', padx=5)
+        items = [(name, (pid, name, pdata)) for pid, name, pdata in self.products_list]
+        res = self._selection_dialog("Выбор продукта", items, "Выберите продукт:")
+        if res is None:
+            return
+        prod_id, prod_name, prod_data = res
+        tree_id = self.tree.insert('', 'end', tags=('product',), values=(
+            '☑', f"🍎 {prod_name}",
+            f"{prod_data['calories']:.0f}", f"{prod_data['proteins']:.1f}",
+            f"{prod_data['fats']:.1f}",     f"{prod_data['carbs']:.1f}",
+            "0", f"{calculate_gn(prod_data['carbs'], prod_data['glycemic_index']):.1f}", "",
+        ))
+        self.components.append(dict(type='product', id=prod_id, name=prod_name,
+            product_data=prod_data, serving_weight=None,
+            tree_id=tree_id, adjustable=True))
 
     def delete_component(self):
-        """Удаление выбранного компонента."""
-        selected = self.tree.selection()
-        if not selected:
-            messagebox.showwarning("Предупреждение", "Выберите компонент для удаления")
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Предупреждение", "Выберите строку для удаления")
             return
+        if messagebox.askyesno("Удаление", "Удалить выбранный компонент?"):
+            tid = sel[0]
+            self.components = [c for c in self.components if c.get('tree_id') != tid]
+            self.tree.delete(tid)
+            self.update_totals(); self.update_insulin_dose()
 
-        if messagebox.askyesno("Подтверждение", "Удалить выбранный компонент?"):
-            # Удаляем из списка компонентов
-            tree_id = selected[0]
-            for i, comp in enumerate(self.components):
-                if comp.get('tree_id') == tree_id:
-                    del self.components[i]
-                    break
+    def clear_all(self):
+        if not self.components:
+            return
+        if messagebox.askyesno("Очистить", "Очистить весь текущий приём?"):
+            self._do_clear()
 
-            # Удаляем из таблицы
-            self.tree.delete(tree_id)
+    def _do_clear(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        self.components.clear()
+        for v in self.total_vars.values():
+            v.set("0.0")
+        for v in (self.insulin_dose_var, self.insulin_food_var,
+                  self.insulin_corr_var, self.insulin_lower_var, self.insulin_upper_var):
+            v.set("0.0")
 
-            # Пересчитываем итоги
-            self.update_totals()
-            self.update_insulin_dose()
+    # ── Взаимодействие с таблицей ─────────────────────────────────────────────
 
     def on_item_double_click(self, event):
-        """Обработчик двойного щелчка по строке таблицы."""
-        selected = self.tree.selection()
-        if not selected:
+        sel = self.tree.selection()
+        if not sel:
             return
-
-        tree_id = selected[0]
-        item = self.tree.item(tree_id)
-
-        # Находим компонент
-        comp = None
-        for c in self.components:
-            if c.get('tree_id') == tree_id:
-                comp = c
-                break
-
+        tid  = sel[0]
+        comp = next((c for c in self.components if c.get('tree_id') == tid), None)
         if not comp:
             return
+        w = simpledialog.askfloat("Вес порции",
+            f"Вес порции для «{comp['name']}» (г):",
+            initialvalue=comp.get('serving_weight') or 100,
+            parent=self)
+        if w and w > 0:
+            comp['serving_weight'] = w
+            n = comp.get('nutrition_per_100') if comp['type'] == 'dish' else None
+            pd = comp.get('product_data')
+            carbs = (pd['carbs'] * w / 100) if pd else ((n['carbs'] * w / 100) if n else 0)
+            vals = list(self.tree.item(tid, 'values'))
+            vals[6] = f"{carbs:.1f}"; vals[8] = f"{w:.0f}"
+            self.tree.item(tid, values=vals)
+            self.update_totals(); self.update_insulin_dose()
 
-        # Диалог ввода веса
-        current_weight = comp.get('serving_weight', '')
-        weight = simpledialog.askfloat(
-            "Вес порции",
-            f"Введите вес порции для '{comp['name']}' (г):",
-            initialvalue=current_weight if current_weight else 100,
-            parent=self
-        )
-
-        if weight is not None and weight > 0:
-            comp['serving_weight'] = weight
-
-            # Обновляем отображение веса в таблице (сохраняя чекбокс)
-            values = list(item['values'])
-            values[7] = f"{weight:.0f}"  # вес порции теперь на позиции 7
-            self.tree.item(tree_id, values=values)
-
-            # Пересчитываем итоги
-            self.update_totals()
-            self.update_insulin_dose()
-
-    # NEW: обработчик клика для переключения чекбокса
     def on_tree_click(self, event):
-        """Обработчик клика для переключения чекбокса в колонке adjust."""
-        region = self.tree.identify_region(event.x, event.y)
-        if region != "cell":
+        if self.tree.identify_region(event.x, event.y) != 'cell':
             return
-        column = self.tree.identify_column(event.x)
-        if column != '#1':  # колонка adjust первая
+        if self.tree.identify_column(event.x) != '#1':
             return
         item = self.tree.identify_row(event.y)
         if not item:
             return
+        vals = list(self.tree.item(item, 'values'))
+        vals[0] = '☐' if vals[0] == '☑' else '☑'
+        self.tree.item(item, values=vals)
+        for c in self.components:
+            if c.get('tree_id') == item:
+                c['adjustable'] = (vals[0] == '☑'); break
 
-        # Получаем текущее значение
-        values = list(self.tree.item(item, 'values'))
-        current = values[0]
-        # Переключаем символ
-        new_val = '☐' if current == '☑' else '☑'
-        values[0] = new_val
-        self.tree.item(item, values=values)
-
-        # Обновляем состояние adjustable в компоненте
-        for comp in self.components:
-            if comp.get('tree_id') == item:
-                comp['adjustable'] = (new_val == '☑')
-                break
+    # ── Расчёты ──────────────────────────────────────────────────────────────
 
     def update_totals(self):
-        """Обновляет итоговые суммы по всем компонентам."""
-        total_cal = total_prot = total_fat = total_carb = total_gn = 0.0
-
+        tc = tp = tf = tcarb = tgn = 0.0
         for comp in self.components:
             if not comp.get('serving_weight'):
                 continue
-
-            weight = comp['serving_weight']
-
+            w = comp['serving_weight']
             if comp['type'] == 'product':
-                nut = calculate_product_nutrition(comp['product_data'], weight)
-                total_cal += nut['calories']
-                total_prot += nut['proteins']
-                total_fat += nut['fats']
-                total_carb += nut['carbs']
-                total_gn += calculate_gn(nut['carbs'], comp['product_data']['glycemic_index'])
+                pd = comp['product_data']
+                n  = calculate_product_nutrition(pd, w)
+                tc += n['calories']; tp += n['proteins']
+                tf += n['fats'];     tcarb += n['carbs']
+                tgn += calculate_gn(n['carbs'], pd['glycemic_index'])
+            else:
+                n = comp.get('nutrition_per_100')
+                if n:
+                    f = w / 100
+                    tc += n['calories']*f; tp += n['proteins']*f
+                    tf += n['fats']*f;     tcarb += n['carbs']*f
+                    tgn += n['gn']*f
+        xe = calculate_xe(tcarb, self.carbs_per_xe)
+        self.total_vars['calories'].set(f"{tc:.1f}")
+        self.total_vars['proteins'].set(f"{tp:.1f}")
+        self.total_vars['fats'].set(f"{tf:.1f}")
+        self.total_vars['carbs'].set(f"{tcarb:.1f}")
+        self.total_vars['gn'].set(f"{tgn:.1f}")
+        self.total_vars['xe'].set(f"{xe:.2f}")
+        self._update_timing_hint(tcarb)
 
-            else:  # dish
-                if comp.get('nutrition_per_100'):
-                    n = comp['nutrition_per_100']
-                    factor = weight / 100
-                    total_cal += n['calories'] * factor
-                    total_prot += n['proteins'] * factor
-                    total_fat += n['fats'] * factor
-                    total_carb += n['carbs'] * factor
-                    total_gn += n['gn'] * factor
+    def _post_to_nightscout(self, meal_id, carbs_g, insulin_units,
+                             glucose_mmol, notes, dt_str):
+        """Отправляет приём пищи на NightScout в фоновом потоке."""
+        cfg = database.get_ns_config()
+        if cfg.get('enabled') != '1' or not cfg.get('url', '').strip():
+            return
 
-        total_xe = calculate_xe(total_carb, self.carbs_per_xe)
+        def _worker():
+            try:
+                from nightscout import NightScoutClient, NightScoutConfig
+                from datetime import datetime as _dt
+                client = NightScoutClient(NightScoutConfig(
+                    url=cfg['url'], token=cfg.get('token', ''), enabled=True))
+                meal_dt = _dt.strptime(dt_str, "%Y-%m-%d %H:%M")
+                client.post_meal(
+                    carbs_g=carbs_g,
+                    insulin_units=insulin_units,
+                    glucose_mmol=glucose_mmol,
+                    notes=notes,
+                    dt=meal_dt,
+                )
+                database.log_ns_sync(meal_id, 'ok', 'Отправлено успешно')
+            except Exception as ex:
+                database.log_ns_sync(meal_id, 'error', str(ex))
 
-        self.total_vars['calories'].set(f"{total_cal:.1f}")
-        self.total_vars['proteins'].set(f"{total_prot:.1f}")
-        self.total_vars['fats'].set(f"{total_fat:.1f}")
-        self.total_vars['carbs'].set(f"{total_carb:.1f}")
-        self.total_vars['gn'].set(f"{total_gn:.1f}")
-        self.total_vars['xe'].set(f"{total_xe:.2f}")
+        threading.Thread(target=_worker, daemon=True).start()
 
-    def update_insulin_dose(self, *args):
-        """Рассчитывает дозу инсулина (пищевую и коррекцию) и определяет ближайшие допустимые значения."""
+    def _on_cgm_glucose(self, mmol: float, trend_delta: float):
+        """
+        Колбэк от NSGlucoseWidget — вызывается при получении свежего показания.
+        Всегда обновляет поле «текущий сахар» (CGM-данные свежее ручного ввода).
+        """
+        self._trend_delta      = trend_delta
+        self._glucose_from_cgm = True   # помечаем, что значение пришло от CGM
+
+        # Временно отключаем trace, чтобы не вызывать update_insulin_dose дважды
+        self.current_glucose_var.set(f"{mmol:.1f}")
+
+        self.update_insulin_dose()
+        self._update_trend_row_visibility(trend_delta)
+
+    def _update_trend_row_visibility(self, delta: float):
+        """Показывает/скрывает ячейку тренда в строке результатов."""
+        if not hasattr(self, 'trend_res_lbl'):
+            return
+        if delta != 0 and not self._trend_row_visible:
+            self.trend_res_lbl.grid(row=0, column=4, sticky='s', padx=(4, 1))
+            self.trend_res_val.grid(row=1, column=4, sticky='n', padx=(4, 0))
+            self.trend_res_unit.grid(row=1, column=5, sticky='sw', padx=(1, 4))
+            self._trend_row_visible = True
+        elif delta == 0 and self._trend_row_visible:
+            self.trend_res_lbl.grid_remove()
+            self.trend_res_val.grid_remove()
+            self.trend_res_unit.grid_remove()
+            self._trend_row_visible = False
+
+    def _update_timing_hint(self, total_carbs: float):
+        """
+        Показывает рекомендацию по времени укола Фиаспа/Люмьева.
+        Фиасп: пик 30–45 мин, быстрое начало — можно колоть за 0–5 мин до еды.
+        При высоком сахаре (> цели) — лучше за 10–15 мин до еды.
+        При низком (< цели) — после еды или во время.
+        """
+        if not hasattr(self, 'timing_var') or total_carbs < 0.5:
+            if hasattr(self, 'timing_var'):
+                self.timing_var.set("")
+            return
+
         try:
-            # Пищевая доза (на ХЕ)
-            xe = float(self.total_vars['xe'].get())
+            cur_gl  = float(self.current_glucose_var.get() or 0)
+            target  = self.insulin_factors['target_glucose']
+        except ValueError:
+            cur_gl = 0
+            target = 6.0
+
+        s = database.get_ns_config()
+        insulin_type = s.get('insulin_type', 'fiasp')
+
+        if insulin_type == 'fiasp':
+            if cur_gl <= 0:
+                hint = "⏱ Фиасп: колите за 0–5 мин до начала еды"
+            elif cur_gl > target + 2:
+                hint = f"⏱ Фиасп: сахар высокий ({cur_gl:.1f}) — колите за 10–15 мин до еды"
+            elif cur_gl < target - 1:
+                hint = f"⏱ Фиасп: сахар низкий ({cur_gl:.1f}) — колите в начале еды или после"
+            else:
+                hint = "⏱ Фиасп: колите за 0–5 мин до начала еды"
+        elif insulin_type == 'novorapid':
+            if cur_gl > target + 2:
+                hint = f"⏱ Новорапид: сахар высокий — колите за 20–30 мин до еды"
+            elif cur_gl < target - 1:
+                hint = f"⏱ Новорапид: сахар низкий — колите в начале еды"
+            else:
+                hint = "⏱ Новорапид: колите за 15–20 мин до начала еды"
+        else:
+            hint = ""
+
+        self.timing_var.set(hint)
+
+    def update_insulin_dose(self, *_):
+        try:
+            xe        = float(self.total_vars['xe'].get())
             food_dose = xe * self.insulin_factors['carb_coefficient']
             self.insulin_food_var.set(f"{food_dose:.1f}")
 
-            # Коррекция по сахару
-            current_glucose = float(self.current_glucose_var.get() or 0)
-            if current_glucose > 0:
-                target = self.insulin_factors['target_glucose']
-                sensitivity = self.insulin_factors['sensitivity']
-                correction = (current_glucose - target) / sensitivity
-                if correction < 0:
-                    correction = 0
-            else:
-                correction = 0
-            self.insulin_corr_var.set(f"{correction:.1f}")
+            cur_gl = float(self.current_glucose_var.get() or 0)
+            corr   = max(0.0, (cur_gl - self.insulin_factors['target_glucose'])
+                         / self.insulin_factors['sensitivity']) if cur_gl > 0 else 0.0
+            self.insulin_corr_var.set(f"{corr:.1f}")
 
-            # Общая доза
-            total_dose = food_dose + correction
-            self.insulin_dose_var.set(f"{total_dose:.1f}")
+            # Поправка тренда CGM
+            trend = self._trend_delta
+            if trend != 0 and hasattr(self, 'trend_dose_var'):
+                sign = '+' if trend > 0 else ''
+                self.trend_dose_var.set(f"{sign}{trend:.1f}")
 
-            # NEW: расчёт ближайших допустимых значений с учётом шага
-            step = self.insulin_step
-            # Округление вниз до ближайшего кратного шагу
-            lower = round((total_dose // step) * step, 1)
-            if lower < 0: lower = 0
-            upper = lower + step
-            # Убираем дублирование, если total_dose точно кратно шагу
-            if abs(total_dose - lower) < 0.01:
-                lower_display = lower
-                upper_display = lower + step
-            else:
-                lower_display = lower
-                upper_display = upper
+            total  = food_dose + corr + trend
+            self.insulin_dose_var.set(f"{total:.1f}")
 
-            self.insulin_lower_var.set(f"{lower_display:.1f}")
-            self.insulin_upper_var.set(f"{upper_display:.1f}")
-
+            step   = self.insulin_step
+            lower  = max(0.0, (total // step) * step)
+            upper  = lower + step
+            self.insulin_lower_var.set(f"{lower:.1f}")
+            self.insulin_upper_var.set(f"{upper:.1f}")
         except (ValueError, ZeroDivisionError):
-            self.insulin_food_var.set("0.0")
-            self.insulin_corr_var.set("0.0")
-            self.insulin_dose_var.set("0.0")
-            self.insulin_lower_var.set("0.0")
-            self.insulin_upper_var.set("0.0")
+            for v in (self.insulin_food_var, self.insulin_corr_var, self.insulin_dose_var,
+                      self.insulin_lower_var, self.insulin_upper_var):
+                v.set("0.0")
 
-    # NEW: метод корректировки еды
+    # ── Корректировка порции ─────────────────────────────────────────────────
+
     def adjust_meal(self):
-        """Корректирует веса отмеченных продуктов для достижения выбранной целевой дозы."""
-        # Проверяем, что все компоненты имеют вес
         for comp in self.components:
             if not comp.get('serving_weight'):
-                messagebox.showerror("Ошибка", f"У компонента '{comp['name']}' не указан вес порции")
+                messagebox.showerror("Ошибка", f"«{comp['name']}»: не указан вес порции")
                 return
-
-        # Получаем целевую дозу
         target = self.target_dose_var.get()
-        if target == 'lower':
-            target_dose = float(self.insulin_lower_var.get())
-        else:
-            target_dose = float(self.insulin_upper_var.get())
+        t_dose = float(self.insulin_lower_var.get() if target == 'lower' else self.insulin_upper_var.get())
+        c_dose = float(self.insulin_dose_var.get())
+        if abs(c_dose - t_dose) < 0.01:
+            messagebox.showinfo("Инфо", "Текущая доза уже равна целевой"); return
 
-        # Получаем текущую общую дозу
-        total_dose = float(self.insulin_dose_var.get())
-        if abs(total_dose - target_dose) < 0.01:
-            messagebox.showinfo("Инфо", "Текущая доза уже равна целевой")
+        total_carbs = sum(
+            (c['product_data']['carbs'] * c['serving_weight'] / 100
+             if c['type'] == 'product'
+             else (c['nutrition_per_100']['carbs'] * c['serving_weight'] / 100
+                   if c.get('nutrition_per_100') else 0))
+            for c in self.components)
+
+        corr   = float(self.insulin_corr_var.get())
+        t_carbs = (t_dose - corr) * self.carbs_per_xe / self.insulin_factors['carb_coefficient']
+        if t_carbs < 0:
+            messagebox.showerror("Ошибка", "Целевая доза слишком мала"); return
+
+        adj = [{'comp': c,
+                'cur_carbs': c['product_data']['carbs'] * c['serving_weight'] / 100,
+                'c100': c['product_data']['carbs']}
+               for c in self.components
+               if c['type'] == 'product' and c.get('adjustable')]
+        if not adj:
+            messagebox.showwarning("Предупреждение", "Нет отмеченных продуктов для корректировки")
             return
+        total_adj = sum(a['cur_carbs'] for a in adj)
+        if total_adj == 0:
+            messagebox.showerror("Ошибка", "Сумма углеводов отмеченных продуктов = 0"); return
 
-        # Вычисляем текущие суммарные углеводы
-        total_carbs = 0
-        for comp in self.components:
-            if comp['type'] == 'product':
-                carbs = (comp['product_data']['carbs'] * comp['serving_weight']) / 100
-                total_carbs += carbs
-            else:  # dish
-                if comp.get('nutrition_per_100'):
-                    carbs = (comp['nutrition_per_100']['carbs'] * comp['serving_weight']) / 100
-                    total_carbs += carbs
-
-        # Целевые углеводы из целевой дозы (учитывая коррекцию)
-        correction = float(self.insulin_corr_var.get())
-        target_carbs = (target_dose - correction) * self.carbs_per_xe / self.insulin_factors['carb_coefficient']
-        if target_carbs < 0:
-            messagebox.showerror("Ошибка", "Целевая доза слишком мала (отрицательные углеводы)")
-            return
-
-        delta_carbs = target_carbs - total_carbs
-
-        # Собираем отмеченные продукты, которые можно корректировать (только продукты, не блюда)
-        adjustable_products = []
-        for comp in self.components:
-            if comp['type'] == 'product' and comp.get('adjustable', False):
-                # Вычисляем текущие углеводы продукта
-                carbs = (comp['product_data']['carbs'] * comp['serving_weight']) / 100
-                adjustable_products.append({
-                    'comp': comp,
-                    'current_carbs': carbs,
-                    'carbs_per_100': comp['product_data']['carbs']
-                })
-
-        if not adjustable_products:
-            messagebox.showwarning("Предупреждение", "Не отмечено ни одного продукта для корректировки")
-            return
-
-        # Распределяем изменение углеводов пропорционально текущему вкладу
-        total_adjustable_carbs = sum(p['current_carbs'] for p in adjustable_products)
-        if total_adjustable_carbs == 0:
-            messagebox.showerror("Ошибка", "Сумма углеводов в отмеченных продуктах равна 0")
-            return
-
-        # Изменяем веса продуктов
-        for prod in adjustable_products:
-            # Доля изменения, приходящаяся на этот продукт
-            share = prod['current_carbs'] / total_adjustable_carbs
-            prod_delta_carbs = delta_carbs * share
-            new_carbs = prod['current_carbs'] + prod_delta_carbs
-            if new_carbs < 0:
-                new_carbs = 0
-            # Новый вес
-            new_weight = (new_carbs * 100) / prod['carbs_per_100']
-            if new_weight < 0:
-                new_weight = 0
-            prod['comp']['serving_weight'] = new_weight
-
-            # Обновляем в таблице
-            tree_id = prod['comp']['tree_id']
-            self.tree.item(tree_id, values=(
-                '☑' if prod['comp']['adjustable'] else '☐',
-                f"🍎 {prod['comp']['name']}",
-                f"{prod['comp']['product_data']['calories']:.0f}",
-                f"{prod['comp']['product_data']['proteins']:.1f}",
-                f"{prod['comp']['product_data']['fats']:.1f}",
-                f"{prod['comp']['product_data']['carbs']:.1f}",
-                f"{calculate_gn(prod['comp']['product_data']['carbs'], prod['comp']['product_data']['glycemic_index']):.1f}",
-                f"{new_weight:.0f}"
+        delta = t_carbs - total_carbs
+        for a in adj:
+            share      = a['cur_carbs'] / total_adj
+            new_carbs  = max(0.0, a['cur_carbs'] + delta * share)
+            new_weight = max(0.0, new_carbs * 100 / a['c100'])
+            a['comp']['serving_weight'] = new_weight
+            pd  = a['comp']['product_data']
+            tid = a['comp']['tree_id']
+            self.tree.item(tid, values=(
+                '☑' if a['comp']['adjustable'] else '☐',
+                f"🍎 {a['comp']['name']}",
+                f"{pd['calories']:.0f}", f"{pd['proteins']:.1f}",
+                f"{pd['fats']:.1f}",     f"{pd['carbs']:.1f}",
+                f"{new_carbs:.1f}",
+                f"{calculate_gn(pd['carbs'], pd['glycemic_index']):.1f}",
+                f"{new_weight:.0f}",
             ))
+        self.update_totals(); self.update_insulin_dose()
+        messagebox.showinfo("Успех", f"Веса скорректированы — целевая доза {t_dose:.1f} ед")
 
-        # Пересчитываем итоги
-        self.update_totals()
-        self.update_insulin_dose()
-        messagebox.showinfo("Успех", f"Веса скорректированы для достижения дозы {target_dose:.1f} ед")
+    # ── Сохранение приёма ────────────────────────────────────────────────────
 
     def save_meal(self):
-        """Сохраняет текущий приём пищи в историю."""
         if not self.components:
-            messagebox.showwarning("Предупреждение", "Нет компонентов для сохранения")
-            return
+            messagebox.showwarning("Предупреждение", "Нет компонентов для сохранения"); return
+        for c in self.components:
+            if not c.get('serving_weight'):
+                messagebox.showerror("Ошибка", f"«{c['name']}»: не указан вес порции"); return
 
-        # Проверяем, что у всех компонентов указан вес
-        for comp in self.components:
-            if not comp.get('serving_weight'):
-                messagebox.showerror("Ошибка", f"У компонента '{comp['name']}' не указан вес порции")
-                return
+        dlg = tk.Toplevel(self)
+        dlg.title("Запись приёма пищи"); dlg.transient(self); dlg.grab_set()
+        dlg.resizable(False, False)
 
-        # Диалог ввода даты/времени, дозы, примечания
-        dialog = tk.Toplevel(self)
-        dialog.title("Сохранение приёма")
-        dialog.transient(self)
-        dialog.grab_set()
-        dialog.geometry("350x450")
+        now = datetime.now().strftime(DATE_FORMAT)
 
-        from datetime import datetime
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        ttk.Label(dlg, text="Дата и время (ГГГГ-ММ-ДД ЧЧ:ММ):").grid(
+            row=0, column=0, padx=12, pady=(14, 4), sticky='e')
+        dt_var = tk.StringVar(value=now)
+        ttk.Entry(dlg, textvariable=dt_var, width=20).grid(row=0, column=1, padx=12, pady=(14, 4), sticky='w')
 
-        # Дата и время
-        ttk.Label(dialog, text="Дата и время (ГГГГ-ММ-ДД ЧЧ:ММ):").pack(pady=5)
-        datetime_var = tk.StringVar(value=now)
-        ttk.Entry(dialog, textvariable=datetime_var, width=20).pack()
+        # Итоги в диалоге
+        sf = ttk.LabelFrame(dlg, text="Итоги приёма", padding=6)
+        sf.grid(row=1, column=0, columnspan=2, padx=12, pady=6, sticky='ew')
+        ttk.Label(sf, text=f"Углеводы: {self.total_vars['carbs'].get()} г   "
+                            f"ХЕ: {self.total_vars['xe'].get()}   "
+                            f"Калории: {self.total_vars['calories'].get()} ккал"
+                  ).pack()
 
-        # Текущий сахар
-        ttk.Label(dialog, text="Уровень сахара (ммоль/л):").pack(pady=5)
-        glucose_var = tk.StringVar(value=self.current_glucose_var.get())
-        ttk.Entry(dialog, textvariable=glucose_var, width=10).pack()
+        ttk.Label(dlg, text="Сахар (ммоль/л):").grid(
+            row=2, column=0, padx=12, pady=4, sticky='e')
+        gl_var = tk.StringVar(value=self.current_glucose_var.get())
+        ttk.Entry(dlg, textvariable=gl_var, width=10).grid(row=2, column=1, padx=12, pady=4, sticky='w')
 
-        # Доза инсулина
-        ttk.Label(dialog, text="Доза инсулина (ед):").pack(pady=5)
-        insulin_var = tk.StringVar(value=self.insulin_dose_var.get())
-        ttk.Entry(dialog, textvariable=insulin_var, width=10).pack()
+        ttk.Label(dlg, text="Доза инсулина (ед):").grid(
+            row=3, column=0, padx=12, pady=4, sticky='e')
+        ins_var = tk.StringVar(value=self.insulin_dose_var.get())
+        ttk.Entry(dlg, textvariable=ins_var, width=10).grid(row=3, column=1, padx=12, pady=4, sticky='w')
 
-        # Примечание
-        ttk.Label(dialog, text="Примечание:").pack(pady=5)
+        ttk.Label(dlg, text="Примечание:").grid(
+            row=4, column=0, padx=12, pady=4, sticky='e')
         notes_var = tk.StringVar()
-        ttk.Entry(dialog, textvariable=notes_var, width=30).pack()
+        ttk.Entry(dlg, textvariable=notes_var, width=28).grid(row=4, column=1, padx=12, pady=4, sticky='w')
 
         def do_save():
-            dt = datetime_var.get().strip()
-            glucose = glucose_var.get().strip()
-            insulin = insulin_var.get().strip()
+            dt_s = dt_var.get().strip()
+            if _parse_datetime(dt_s) is None:
+                messagebox.showerror("Ошибка",
+                    f"Неверный формат даты.\nОжидается: ГГГГ-ММ-ДД ЧЧ:ММ\nПример: {now}",
+                    parent=dlg); return
+            gl  = gl_var.get().strip()
+            ins = ins_var.get().strip()
             notes = notes_var.get().strip() or None
-
-            # Формируем список компонентов для сохранения
-            components_for_db = []
+            db_comps = []
             for comp in self.components:
                 if comp['type'] == 'product':
-                    components_for_db.append({
-                        'type': 'product',
-                        'id': comp['id'],
-                        'name': comp['name'],
-                        'serving_weight': comp['serving_weight']
-                    })
-                else:  # dish
-                    # Для блюда восстанавливаем состав продуктов
-                    composition_portion = []
+                    db_comps.append(dict(type='product', id=comp['id'],
+                        name=comp['name'], serving_weight=comp['serving_weight']))
+                else:
+                    portion = []
                     if comp.get('composition'):
-                        total_weight = sum(item['weight'] for item in comp['composition'])
-                        if total_weight > 0:
-                            factor = comp['serving_weight'] / total_weight
-                            for item in comp['composition']:
-                                composition_portion.append({
-                                    'product_id': item['product_id'],
-                                    'weight': item['weight'] * factor
-                                })
-
-                    components_for_db.append({
-                        'type': 'dish',
-                        'id': comp['id'],
-                        'name': comp['name'],
-                        'serving_weight': comp['serving_weight'],
-                        'composition': composition_portion
-                    })
-
+                        tw = sum(i['weight'] for i in comp['composition'])
+                        if tw > 0:
+                            f = comp['serving_weight'] / tw
+                            portion = [dict(product_id=i['product_id'], weight=i['weight']*f)
+                                       for i in comp['composition']]
+                    db_comps.append(dict(type='dish', id=comp['id'],
+                        name=comp['name'], serving_weight=comp['serving_weight'],
+                        composition=portion))
             try:
-                database.save_meal(
-                    dt,
-                    float(insulin) if insulin else None,
-                    notes,
-                    components_for_db,
-                    float(glucose) if glucose else None
+                meal_id = database.save_meal(
+                    dt_s, float(ins) if ins else None, notes, db_comps,
+                    float(gl) if gl else None)
+                messagebox.showinfo("Сохранено", "Приём пищи записан в историю")
+                dlg.destroy()
+
+                # ── Отправка на NightScout в фоне ────────────────────────
+                self._post_to_nightscout(
+                    meal_id=meal_id,
+                    carbs_g=float(self.total_vars['carbs'].get()),
+                    insulin_units=float(ins) if ins else 0.0,
+                    glucose_mmol=float(gl) if gl else None,
+                    notes=notes or '',
+                    dt_str=dt_s,
                 )
-                messagebox.showinfo("Успех", "Приём пищи сохранён")
-                dialog.destroy()
 
                 if messagebox.askyesno("Очистить", "Очистить текущий приём?"):
-                    # Очищаем таблицу и список компонентов
-                    for item in self.tree.get_children():
-                        self.tree.delete(item)
-                    self.components.clear()
-                    self.total_vars['calories'].set("0.0")
-                    self.total_vars['proteins'].set("0.0")
-                    self.total_vars['fats'].set("0.0")
-                    self.total_vars['carbs'].set("0.0")
-                    self.total_vars['gn'].set("0.0")
-                    self.total_vars['xe'].set("0.0")
-                    self.insulin_dose_var.set("0.0")
+                    self._do_clear()
+                    self._trend_delta = 0.0
+            except Exception as ex:
+                messagebox.showerror("Ошибка", str(ex), parent=dlg)
 
-            except Exception as e:
-                messagebox.showerror("Ошибка", f"Не удалось сохранить: {e}")
-
-        ttk.Button(dialog, text="Сохранить", command=do_save).pack(pady=10)
-        ttk.Button(dialog, text="Отмена", command=dialog.destroy).pack()
+        bf = ttk.Frame(dlg)
+        bf.grid(row=5, column=0, columnspan=2, pady=12)
+        ttk.Button(bf, text="Сохранить", command=do_save,      width=14).pack(side='left', padx=5)
+        ttk.Button(bf, text="Отмена",    command=dlg.destroy,  width=14).pack(side='left', padx=5)

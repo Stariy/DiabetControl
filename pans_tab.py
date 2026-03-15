@@ -2,252 +2,148 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import os
 import shutil
-from PIL import Image, ImageTk
 import database
 from config import PANS_PHOTO_DIR
+from theme import COLOR_ROW_EVEN, COLOR_ROW_ODD
 
 
 class PansTab(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
-
-        # Настройка стиля для Treeview
-        self._configure_treeview_style()
-
         self.create_widgets()
         self.refresh_table()
-
-    def _configure_treeview_style(self):
-        """Настраивает стиль Treeview для правильной высоты строк и чередования фона."""
-        style = ttk.Style()
-
-        # Определяем оптимальную высоту строки
-        temp_label = ttk.Label(self, text="Тест", font=('Arial', 10))
-        temp_label.pack()
-        row_height = temp_label.winfo_reqheight() + 4  # добавляем небольшой отступ
-        temp_label.destroy()
-
-        # Настраиваем стиль для Treeview
-        style.configure(
-            "Pans.Treeview",
-            rowheight=row_height,
-            font=('Arial', 10),
-            background='#f5f5f5',
-            fieldbackground='#f5f5f5'
-        )
-
-        style.configure(
-            "Pans.Treeview.Heading",
-            font=('Arial', 10, 'bold'),
-            relief='raised'
-        )
-
-        # Настраиваем цвета для выделения
-        style.map(
-            "Pans.Treeview",
-            background=[('selected', '#0078d7')],
-            foreground=[('selected', 'white')]
-        )
+        self.bind('<Map>', lambda e: self.refresh_table())
 
     def create_widgets(self):
-        # Кнопки
-        btn_frame = ttk.Frame(self)
-        btn_frame.pack(fill='x', padx=5, pady=5)
+        btn = ttk.Frame(self)
+        btn.pack(fill='x', padx=8, pady=(8, 4))
+        ttk.Button(btn, text="Добавить",      command=self.add_pan).pack(side='left', padx=2)
+        ttk.Button(btn, text="Редактировать", command=self.edit_pan).pack(side='left', padx=2)
+        ttk.Button(btn, text="Удалить",       command=self.delete_pan).pack(side='left', padx=2)
 
-        ttk.Button(btn_frame, text="Добавить", command=self.add_pan).pack(side='left', padx=2)
-        ttk.Button(btn_frame, text="Редактировать", command=self.edit_pan).pack(side='left', padx=2)
-        ttk.Button(btn_frame, text="Удалить", command=self.delete_pan).pack(side='left', padx=2)
+        tf = ttk.Frame(self)
+        tf.pack(fill='both', expand=True, padx=8, pady=(0, 8))
+        tf.columnconfigure(0, weight=1)
+        tf.rowconfigure(0, weight=1)
 
-        # Таблица кастрюль с настроенным стилем
-        columns = ('id', 'name', 'weight', 'photo')
-        self.tree = ttk.Treeview(
-            self,
-            columns=columns,
-            show='headings',
-            selectmode='browse',
-            style="Pans.Treeview"
-        )
+        cols = ('id', 'name', 'weight', 'photo')
+        self.tree = ttk.Treeview(tf, columns=cols, show='headings',
+                                 selectmode='browse', style="App.Treeview")
+        specs = [
+            ('id',     'ID',        45,  'center', False),
+            ('name',   'Название', 200,  'w',      True),
+            ('weight', 'Вес (г)',  100,  'center', False),
+            ('photo',  'Фото',     260,  'w',      False),
+        ]
+        for col, text, w, anchor, stretch in specs:
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=w, anchor=anchor, minwidth=40, stretch=stretch)
 
-        # Настройка заголовков
-        self.tree.heading('id', text='ID')
-        self.tree.heading('name', text='Название')
-        self.tree.heading('weight', text='Вес (г)')
-        self.tree.heading('photo', text='Фото')
+        self.tree.tag_configure('even', background=COLOR_ROW_EVEN)
+        self.tree.tag_configure('odd',  background=COLOR_ROW_ODD)
 
-        # Настройка ширины колонок
-        self.tree.column('id', width=40, anchor='center')
-        self.tree.column('name', width=200, anchor='w')
-        self.tree.column('weight', width=100, anchor='center')
-        self.tree.column('photo', width=250, anchor='w')
+        vsb = ttk.Scrollbar(tf, orient='vertical', command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
 
-        # Настраиваем теги для чередования фона
-        self.tree.tag_configure('oddrow', background='#ffffff')
-        self.tree.tag_configure('evenrow', background='#f0f0f0')
-
-        # Скроллбар
-        scrollbar = ttk.Scrollbar(self, orient='vertical', command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-
-        # Привязываем обработчик двойного щелчка
         self.tree.bind('<Double-1>', lambda e: self.edit_pan())
 
-        # Размещаем виджеты
-        self.tree.pack(side='left', fill='both', expand=True, padx=(5, 0), pady=5)
-        scrollbar.pack(side='right', fill='y', padx=(0, 5), pady=5)
-
     def refresh_table(self):
-        """Обновляет данные в таблице из базы с чередованием фона."""
-        # Очищаем таблицу
-        for row in self.tree.get_children():
-            self.tree.delete(row)
+        for r in self.tree.get_children():
+            self.tree.delete(r)
+        for i, p in enumerate(database.get_all_pans()):
+            photo = os.path.basename(p['photo_path']) if p['photo_path'] else ''
+            tag   = 'even' if i % 2 == 0 else 'odd'
+            self.tree.insert('', 'end', tags=(tag,), values=(
+                p['id'], p['name'],
+                f"{p['weight']:.0f}" if p['weight'] else '0',
+                photo,
+            ))
 
-        # Загружаем кастрюли
-        pans = database.get_all_pans()
-
-        # Вставляем с чередованием фона
-        for i, p in enumerate(pans):
-            # Определяем тег для чередования (четные/нечетные строки)
-            tag = 'evenrow' if i % 2 == 0 else 'oddrow'
-
-            # Показываем только имя файла, если путь есть
-            photo_display = os.path.basename(p['photo_path']) if p['photo_path'] else ''
-
-            # Форматируем вес
-            weight_display = f"{p['weight']:.0f}" if p['weight'] else "0"
-
-            self.tree.insert('', 'end',
-                             values=(
-                                 p['id'],
-                                 p['name'],
-                                 weight_display,
-                                 photo_display
-                             ),
-                             tags=(tag,)
-                             )
-
-    def add_pan(self):
-        self._edit_dialog()
-
+    def add_pan(self):    self._edit_dialog()
     def edit_pan(self):
-        selected = self.tree.selection()
-        if not selected:
+        sel = self.tree.selection()
+        if not sel:
             messagebox.showwarning("Предупреждение", "Выберите кастрюлю для редактирования")
             return
-        item = self.tree.item(selected[0])
-        pan_id = item['values'][0]
-        self._edit_dialog(pan_id)
+        self._edit_dialog(self.tree.item(sel[0])['values'][0])
 
     def delete_pan(self):
-        selected = self.tree.selection()
-        if not selected:
+        sel = self.tree.selection()
+        if not sel:
             messagebox.showwarning("Предупреждение", "Выберите кастрюлю для удаления")
             return
-        if messagebox.askyesno("Подтверждение", "Удалить выбранную кастрюлю?\nФото не будет удалено с диска."):
-            item = self.tree.item(selected[0])
-            pan_id = item['values'][0]
-            database.delete_pan(pan_id)
+        name = self.tree.item(sel[0])['values'][1]
+        if messagebox.askyesno("Удаление",
+                f"Удалить кастрюлю «{name}»?\nФото с диска удалено не будет."):
+            database.delete_pan(self.tree.item(sel[0])['values'][0])
             self.refresh_table()
 
     def _edit_dialog(self, pan_id=None):
-        dialog = tk.Toplevel(self)
-        dialog.title("Добавление кастрюли" if pan_id is None else "Редактирование кастрюли")
-        dialog.transient(self)
-        dialog.grab_set()
-        dialog.resizable(False, False)
+        dlg = tk.Toplevel(self)
+        dlg.title("Добавление кастрюли" if pan_id is None else "Редактирование кастрюли")
+        dlg.transient(self); dlg.grab_set(); dlg.resizable(False, False)
+        pad = dict(padx=8, pady=5)
 
-        # Поля
-        ttk.Label(dialog, text="Название:", font=('Arial', 10)).grid(
-            row=0, column=0, padx=5, pady=5, sticky='e'
-        )
-        name_entry = ttk.Entry(dialog, width=30, font=('Arial', 10))
-        name_entry.grid(row=0, column=1, padx=5, pady=5, sticky='w')
+        ttk.Label(dlg, text="Название:").grid(row=0, column=0, sticky='e', **pad)
+        name_e = ttk.Entry(dlg, width=28); name_e.grid(row=0, column=1, columnspan=2, sticky='w', **pad)
 
-        ttk.Label(dialog, text="Вес (г):", font=('Arial', 10)).grid(
-            row=1, column=0, padx=5, pady=5, sticky='e'
-        )
-        weight_entry = ttk.Entry(dialog, width=30, font=('Arial', 10))
-        weight_entry.grid(row=1, column=1, padx=5, pady=5, sticky='w')
+        ttk.Label(dlg, text="Вес тары (г):").grid(row=1, column=0, sticky='e', **pad)
+        weight_e = ttk.Entry(dlg, width=14); weight_e.grid(row=1, column=1, sticky='w', **pad)
 
-        ttk.Label(dialog, text="Фото:", font=('Arial', 10)).grid(
-            row=2, column=0, padx=5, pady=5, sticky='e'
-        )
+        ttk.Label(dlg, text="Фото:").grid(row=2, column=0, sticky='e', **pad)
+        photo_var = tk.StringVar()
+        photo_e = ttk.Entry(dlg, textvariable=photo_var, width=22, state='readonly')
+        photo_e.grid(row=2, column=1, sticky='w', **pad)
+        ttk.Button(dlg, text="Обзор…",
+                   command=lambda: self._pick_photo(photo_var)).grid(row=2, column=2, **pad)
 
-        # Фрейм для поля ввода и кнопки выбора фото
-        photo_frame = ttk.Frame(dialog)
-        photo_frame.grid(row=2, column=1, columnspan=2, padx=5, pady=5, sticky='w')
-
-        photo_path_var = tk.StringVar()
-        photo_entry = ttk.Entry(photo_frame, textvariable=photo_path_var, width=30,
-                                state='readonly', font=('Arial', 10))
-        photo_entry.pack(side='left', padx=(0, 5))
-
-        ttk.Button(photo_frame, text="Обзор...", command=lambda: self._choose_photo(photo_path_var),
-                   width=10).pack(side='left')
-
-        # Если редактирование, загружаем данные
-        if pan_id is not None:
-            pan = database.get_pan(pan_id)
-            if pan:
-                name_entry.insert(0, pan['name'])
-                weight_entry.insert(0, str(pan['weight']))
-                if pan['photo_path']:
-                    photo_path_var.set(pan['photo_path'])
+        if pan_id:
+            p = database.get_pan(pan_id)
+            if p:
+                name_e.insert(0, p['name'])
+                weight_e.insert(0, str(p['weight']))
+                if p['photo_path']:
+                    photo_var.set(p['photo_path'])
 
         def save():
-            name = name_entry.get().strip()
+            name = name_e.get().strip()
             if not name:
-                messagebox.showerror("Ошибка", "Название обязательно")
-                return
+                messagebox.showerror("Ошибка", "Название обязательно", parent=dlg); return
             try:
-                weight = float(weight_entry.get())
+                weight = float(weight_e.get())
                 if weight <= 0:
-                    messagebox.showerror("Ошибка", "Вес должен быть положительным числом")
-                    return
+                    raise ValueError
             except ValueError:
-                messagebox.showerror("Ошибка", "Вес должен быть числом")
+                messagebox.showerror("Ошибка", "Вес должен быть положительным числом", parent=dlg)
                 return
-            photo_path = photo_path_var.get().strip() or None
-
+            photo = photo_var.get().strip() or None
             try:
-                if pan_id is None:
-                    database.add_pan(name, weight, photo_path)
-                else:
-                    database.update_pan(pan_id, name, weight, photo_path)
-                dialog.destroy()
-                self.refresh_table()
-            except Exception as e:
-                messagebox.showerror("Ошибка", f"Не удалось сохранить кастрюлю: {e}")
+                if pan_id is None: database.add_pan(name, weight, photo)
+                else:              database.update_pan(pan_id, name, weight, photo)
+                dlg.destroy(); self.refresh_table()
+            except Exception as ex:
+                messagebox.showerror("Ошибка", str(ex), parent=dlg)
 
-        btn_frame = ttk.Frame(dialog)
-        btn_frame.grid(row=3, column=0, columnspan=3, pady=10)
+        bf = ttk.Frame(dlg); bf.grid(row=3, column=0, columnspan=3, pady=12)
+        ttk.Button(bf, text="Сохранить", command=save,       width=14).pack(side='left', padx=5)
+        ttk.Button(bf, text="Отмена",   command=dlg.destroy, width=14).pack(side='left', padx=5)
 
-        ttk.Button(btn_frame, text="Сохранить", command=save, width=15).pack(side='left', padx=5)
-        ttk.Button(btn_frame, text="Отмена", command=dialog.destroy, width=15).pack(side='left', padx=5)
-
-    def _choose_photo(self, photo_path_var):
-        """Выбор и копирование фото."""
-        filename = filedialog.askopenfilename(
-            title="Выберите изображение",
-            filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp")]
-        )
-        if filename:
-            try:
-                # Копируем файл в папку pans_photos
-                base = os.path.basename(filename)
-                dest = os.path.join(PANS_PHOTO_DIR, base)
-
-                # Если файл с таким именем уже есть, добавляем суффикс
-                counter = 1
-                name, ext = os.path.splitext(base)
-                while os.path.exists(dest):
-                    dest = os.path.join(PANS_PHOTO_DIR, f"{name}_{counter}{ext}")
-                    counter += 1
-
-                shutil.copy2(filename, dest)
-
-                # Сохраняем относительный путь
-                rel_path = os.path.relpath(dest, start=os.path.dirname(database.DB_PATH))
-                photo_path_var.set(rel_path)
-
-            except Exception as e:
-                messagebox.showerror("Ошибка", f"Не удалось скопировать фото: {e}")
+    def _pick_photo(self, var):
+        fn = filedialog.askopenfilename(
+            title="Выберите фото",
+            filetypes=[("Изображения", "*.jpg *.jpeg *.png *.bmp"), ("Все файлы", "*.*")])
+        if not fn:
+            return
+        try:
+            base = os.path.basename(fn)
+            dst  = os.path.join(PANS_PHOTO_DIR, base)
+            n, ext = os.path.splitext(base)
+            cnt = 1
+            while os.path.exists(dst):
+                dst = os.path.join(PANS_PHOTO_DIR, f"{n}_{cnt}{ext}"); cnt += 1
+            shutil.copy2(fn, dst)
+            var.set(os.path.relpath(dst, start=os.path.dirname(database.DB_PATH)))
+        except Exception as ex:
+            messagebox.showerror("Ошибка", f"Не удалось скопировать фото: {ex}")
