@@ -266,15 +266,46 @@ class SimulatorTab(ttk.Frame):
         # ── row 3: Легенда ────────────────────────────────────────────────────
         legend = ttk.Frame(self)
         legend.grid(row=3, column=0, sticky='w', padx=12, pady=(2, 6))
-        for color, text in [('#2980b9', '── Рост сахара от еды'),
-                             ('#e74c3c', '── Действие инсулина'),
-                             ('#27ae60', '── Прогноз (итого)')]:
+        for color, text in [('#2980b9', '── Сахар: только еда (без укола)'),
+                             ('#e74c3c', '── Сахар: только укол (без еды)'),
+                             ('#27ae60', '── Прогноз: еда + укол')]:
             f = ttk.Frame(legend)
             f.pack(side='left', padx=10)
             tk.Label(f, text='━━', foreground=color, background='white',
                      font=('Segoe UI', 10, 'bold')).pack(side='left')
             ttk.Label(f, text=text,
                       font=('Segoe UI', 9)).pack(side='left', padx=2)
+
+    def _get_basal_rate_per_min(self) -> float:
+        """
+        Возвращает скорость снижения сахара от длинного инсулина (ммоль/л в мин).
+        Лантус/Туджео: равномерный профиль 24 ч.
+        Левемир: активен ~16–18 ч, потом спад.
+        """
+        cfg  = database.get_ns_config()
+        s    = database.get_settings()
+        btype = cfg.get('basal_type', 'none')
+        if btype == 'none':
+            return 0.0
+        try:
+            dose = float(cfg.get('basal_dose', '0') or 0)
+        except ValueError:
+            return 0.0
+        if dose <= 0:
+            return 0.0
+
+        sens = s.get('sensitivity', 2.0)
+
+        if btype == 'lantus':
+            duration_min = 24 * 60   # равномерно 24 ч
+        else:  # levemir
+            duration_min = 17 * 60   # ~17 ч
+
+        # Суммарный эффект = доза × чувствительность
+        # Распределяем равномерно по активному окну
+        total_drop = dose * sens           # ммоль/л за всё время действия
+        rate       = total_drop / duration_min
+        return rate
 
     def _on_type_change(self):
         """При смене типа инсулина — подставляем стандартные параметры профиля."""
@@ -368,18 +399,22 @@ class SimulatorTab(ttk.Frame):
         carb_curve = carb_absorption_curve(carbs, gi, T_MAX, STEP) if carbs > 0 else []
         ins_curve  = insulin_action_curve(insulin, profile, T_MAX, STEP) if insulin > 0 else []
 
-        # Суммарный прогноз: glucose0 + подъём от еды + снижение от инсулина
-        times = list(range(0, T_MAX + STEP, STEP))
         carb_map = dict(carb_curve)
         ins_map  = dict(ins_curve)
+
+        # Базальный инсулин — линейный фон снижения сахара
+        times = list(range(0, T_MAX + STEP, STEP))
+
+        # Базальный инсулин — линейный фон снижения сахара
+        basal_rate = self._get_basal_rate_per_min()  # ммоль/л в минуту
 
         combined = []
         for t in times:
             carb_d = carb_map.get(t, 0)
-            # Инсулин с задержкой offset_min
             t_ins  = t - offset_min
             ins_d  = ins_map.get(t_ins, 0) if t_ins >= 0 else 0
-            combined.append((t, glucose0 + carb_d + ins_d))
+            basal_d = -basal_rate * t   # нарастающее снижение от базального
+            combined.append((t, glucose0 + carb_d + ins_d + basal_d))
 
         # Оси
         PAD_L, PAD_R, PAD_T, PAD_B = 55, 20, 20, 35
@@ -457,12 +492,12 @@ class SimulatorTab(ttk.Frame):
             self.canvas.create_line(*pts, fill=color, width=width,
                                     dash=dash, smooth=True)
 
-        # Кривая углеводов (синяя пунктирная)
+        # Синяя: только еда — куда пойдёт сахар без укола
         if carb_curve:
             draw_curve([(t, glucose0 + v) for t, v in carb_curve],
                        '#2980b9', dash=(6, 3))
 
-        # Кривая инсулина (красная пунктирная)
+        # Красная: только укол — куда пойдёт сахар без еды
         if ins_curve:
             draw_curve([(t, glucose0 + ins_map.get(t - offset_min, 0))
                         for t in times],
@@ -495,8 +530,10 @@ class SimulatorTab(ttk.Frame):
             peak_val  = max(v for _, v in combined)
             peak_t    = next(t for t, v in combined if v == peak_val)
             final_val = combined[-1][1]
+            basal_rate = self._get_basal_rate_per_min()
+            basal_info = f"  │  Базал: {basal_rate*60:.2f} ммоль/ч" if basal_rate > 0 else ""
             summary = (f"Пик: {peak_val:.1f} ммоль/л (t={peak_t}′)  "
-                       f"│  Через 4 ч: {final_val:.1f} ммоль/л")
+                       f"│  Через 4 ч: {final_val:.1f} ммоль/л{basal_info}")
             self.canvas.create_text(w // 2, h - 5, text=summary,
                                     anchor='s', font=('Segoe UI', 8),
                                     fill='#34495e')

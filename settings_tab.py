@@ -73,8 +73,30 @@ class SettingsTab(ttk.Frame):
             "Целевой сахар, максимум (ммоль/л):",
             "Верхняя граница целевого диапазона", "7.8")
 
-        # ── NightScout ────────────────────────────────────────────────────────
-        self._section(inner, "NightScout / CGM", nr())
+        # ── Базальный инсулин ────────────────────────────────────────────────
+        self._section(inner, "Базальный инсулин (длинный)", nr())
+
+        basal_type_row = nr()
+        ttk.Label(inner, text="Тип длинного инсулина:").grid(
+            row=basal_type_row, column=0, sticky='e', padx=(24, 8), pady=5)
+        self.basal_type_var = tk.StringVar(value='lantus')
+        bt_frame = ttk.Frame(inner)
+        bt_frame.grid(row=basal_type_row, column=1, columnspan=2, sticky='w', pady=5)
+        for lbl, val in [("Лантус / Туджео (24 ч)", 'lantus'),
+                          ("Левемир (16–18 ч)", 'levemir'),
+                          ("Не использую", 'none')]:
+            ttk.Radiobutton(bt_frame, text=lbl,
+                            variable=self.basal_type_var, value=val).pack(side='left', padx=(0, 10))
+
+        self.basal_dose_var = self._field(inner, nr(),
+            "Суточная доза (ед):",
+            "Например: 10. Используется в симуляторе для учёта базального фона", "0")
+
+        self.basal_time_var = self._field(inner, nr(),
+            "Время укола (ЧЧ:ММ):",
+            "Например: 22:00. Нужно для расчёта, сколько длинного инсулина активно прямо сейчас", "22:00")
+
+        # ── NightScout ────────────────────────────────────────────────────────        self._section(inner, "NightScout / CGM", nr())
 
         ns_row = nr()
         ttk.Label(inner, text="Включить NightScout:").grid(
@@ -193,6 +215,10 @@ class SettingsTab(ttk.Frame):
         self.ns_enabled_var.set(ns_cfg.get('enabled', '0') == '1')
         self.ns_url_var.set(ns_cfg.get('url', ''))
         self.ns_token_var.set(ns_cfg.get('token', ''))
+        # Basal
+        self.basal_type_var.set(ns_cfg.get('basal_type', 'lantus'))
+        self.basal_dose_var.set(ns_cfg.get('basal_dose', '0'))
+        self.basal_time_var.set(ns_cfg.get('basal_time', '22:00'))
 
     def save_settings(self):
         try:
@@ -223,17 +249,22 @@ class SettingsTab(ttk.Frame):
             'target_glucose_max': t_max,
             'target_glucose':     (t_min + t_max) / 2,
         })
-        # insulin_type — строковая настройка, сохраняем через ns_config (TEXT-таблица)
+        # Сохраняем NS-конфиг + типы инсулина + базальный
         database.save_ns_config(
             url=self.ns_url_var.get().strip(),
             token=self.ns_token_var.get().strip(),
             enabled=self.ns_enabled_var.get(),
         )
-        # Сохраняем тип инсулина отдельно через ns_config как строку
         with database.get_connection() as conn:
             database._ensure_ns_tables(conn)
-            conn.execute("INSERT OR REPLACE INTO ns_config (key, value) VALUES (?, ?)",
-                         ('insulin_type', self.insulin_type_var.get()))
+            for key, value in [
+                ('insulin_type', self.insulin_type_var.get()),
+                ('basal_type',   self.basal_type_var.get()),
+                ('basal_dose',   self.basal_dose_var.get().strip()),
+                ('basal_time',   self.basal_time_var.get().strip()),
+            ]:
+                conn.execute("INSERT OR REPLACE INTO ns_config (key, value) VALUES (?, ?)",
+                             (key, value))
             conn.commit()
 
         # Синхронизируем все вкладки

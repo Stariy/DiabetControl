@@ -100,8 +100,16 @@ class MainApp:
         # Применяем единую тему ПОСЛЕ создания root
         theme.apply_theme()
 
+        # Кнопка справки — ПЕРЕД notebook чтобы была сверху
+        help_bar = ttk.Frame(root)
+        help_bar.pack(fill='x', padx=4, pady=(4, 0))
+        ttk.Button(help_bar, text="❓ Справка",
+                   command=self.open_help).pack(side='right', padx=4)
+        ttk.Label(help_bar, text="DiabetControl",
+                  font=('Segoe UI', 9), foreground='gray').pack(side='left', padx=4)
+
         nb = ttk.Notebook(root)
-        nb.pack(fill='both', expand=True, padx=4, pady=4)
+        nb.pack(fill='both', expand=True, padx=4, pady=(2, 4))
         self.notebook = nb
 
         self.calculator_tab = CalculatorTab(nb)
@@ -126,6 +134,18 @@ class MainApp:
         nb.add(self.simulator_tab, text="  Симулятор  ")
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def open_help(self):
+        """Открывает HTML-справку в браузере по умолчанию."""
+        import webbrowser
+        import os
+        help_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'help.html')
+        if os.path.exists(help_path):
+            webbrowser.open(f'file:///{help_path.replace(os.sep, "/")}')
+        else:
+            from tkinter import messagebox
+            messagebox.showinfo("Справка",
+                "Файл справки help.html не найден рядом с программой.")
 
     def on_close(self):
         if self.calculator_tab.components:
